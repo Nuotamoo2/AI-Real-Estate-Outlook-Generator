@@ -1,0 +1,12 @@
+# Ignoruj wirtualne środowisko
+venv/
+
+# Ignoruj pliki tymczasowe Pythona
+__pycache__/
+*.pyc
+
+# Ignoruj ewentualne ukryte pliki systemowe
+.DS_Store
+
+# Ignoruj pliki z hasłami (gdybyś kiedyś takie dodał)
+.env
