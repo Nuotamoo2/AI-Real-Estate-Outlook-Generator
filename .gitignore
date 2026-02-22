@@ -10,3 +10,6 @@ __pycache__/
 
 # Ignoruj pliki z hasłami (gdybyś kiedyś takie dodał)
 .env
+
+# ignoruj plik z kluczem API
+.api_key.txt
