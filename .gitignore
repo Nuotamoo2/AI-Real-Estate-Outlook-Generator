@@ -13,3 +13,6 @@ __pycache__/
 
 # ignoruj plik z kluczem API
 .api_key.txt
+
+#archieved_hardcoded_tabs
+archieved_hardcodec_tabs/
