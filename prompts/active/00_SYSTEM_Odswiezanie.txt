@@ -1,0 +1,8 @@
+SZABLON JSON:
+{template_json}
+
+NOWE DANE CSV:
+{csv_content}
+
+Zaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {custom_instruction}
+Zachowaj te same klucze i układ. UWAGA KRYTYCZNA: Zwrócony JSON musi mieć absolutnie nienaganną składnię. NIE WOLNO CI SAMOWOLNIE ROZDZIELAĆ DANYCH NA NOWE TABELE. Trzymaj się struktury z szablonu. Zwróć zaktualizowany JSON.

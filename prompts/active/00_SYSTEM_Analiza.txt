@@ -1,0 +1,3 @@
+Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {custom_instruction}
+Oczekiwany format: {"report_title": "Wymyśl główny tytuł raportu pasujący do tych danych", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "data": [{"KolX": "A", "KolY": 1}] } ]}. Typy wykresów: line, bar, pie, scatter, area, none. UWAGA KRYTYCZNA: ZABRANIAM CI dzielić danych na kilka tabel! Masz umieścić 100% wierszy z CSV wewnątrz JEDNEJ tabeli w obiekcie "tables". Nie grupuj ich samowolnie po kategoriach. WYGENERUJ W 100% PRAWIDŁOWY SKŁADNIOWO JSON! Pamiętaj o przecinkach pomiędzy wierszami. Wszelkie cudzysłowy wewnątrz tekstu zamieniaj na apostrofy. DANE:
+{csv_content}

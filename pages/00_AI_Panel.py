@@ -13,16 +13,18 @@ import uuid
 from utils import setup_session_state, load_css, render_sidebar, clean_url, clean_ai_json_output, ai_analyze_custom_sheets
 
 st.set_page_config(page_title="Studio Zakładek", layout="wide")
-setup_session_state()
+setup_session_state() # Tutaj aplikacja upewnia się, że pliki systemowe istnieją
 load_css()
 render_sidebar()
 
 os.makedirs("archive", exist_ok=True)
 os.makedirs("pages", exist_ok=True)
+os.makedirs("prompts/active", exist_ok=True)
+os.makedirs("prompts/archive", exist_ok=True)
 
 st.title("🛠️ Studio Zakładek i Menedżer Raportów")
 
-tab_kreator, tab_menedzer = st.tabs(["🪄 Kreator (Nowa / Edycja)", "🗄️ Zarządzanie i Kolejność"])
+tab_kreator, tab_menedzer, tab_prompty = st.tabs(["🪄 Kreator (Nowa / Edycja)", "🗄️ Zarządzanie i Kolejność", "🧠 Główne Prompty (Silnik AI)"])
 
 with tab_kreator:
     st.info("Podaj bazowy link. Stworzysz z niego szablon logiki, który na zawsze zapisze się jako zakładka. Będziesz mógł podmieniać jego link w panelu bocznym!")
@@ -54,12 +56,11 @@ with tab_kreator:
         selected_sheets = st.multiselect("Zaznacz arkusze z danymi (AI je odczyta i ustali kolumny):", st.session_state.builder_sheets, default=def_sheets)
         st.session_state.builder_selected_sheets = selected_sheets
         
-        # --- NOWE: Instrukcja dla AI, jak czytać trudne tabele ---
         st.markdown("### 🧠 Instrukcje czytania tabeli dla AI (Opcjonalne)")
         extraction_instruction = st.text_area(
             "Jeśli plik jest zawiły (np. pytania w wierszach, dziwne nagłówki), powiedz AI jak ma to potraktować:", 
             value=st.session_state.get('extraction_instruction', ''),
-            placeholder="np. Tabela ma sekcje podzielone wierszami z pytaniami (1. Jakie są...). Utwórz nową kolumnę 'Pytanie' i przepisz tam te nagłówki dla wierszy poniżej."
+            placeholder="np. Tabela ma sekcje podzielone wierszami z pytaniami..."
         )
         st.session_state.extraction_instruction = extraction_instruction
         
@@ -70,9 +71,8 @@ with tab_kreator:
                 try:
                     with st.spinner("AI analizuje struktury i buduje tabele... To potrwa kilka sekund."):
                         excel = pd.ExcelFile(io.BytesIO(st.session_state.builder_excel))
-                        csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(50).to_csv(index=False)}" for s in selected_sheets])
+                        csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(60).to_csv(index=False)}" for s in selected_sheets])
                         
-                        # Przekazujemy nową instrukcję!
                         parsed = ai_analyze_custom_sheets(csv_text, st.session_state.gemini_key, st.session_state.model_name, extraction_instruction)
                         if parsed and "tables" in parsed:
                             st.session_state.builder_data = parsed["tables"]
@@ -109,25 +109,6 @@ with tab_kreator:
                 if "pandas_code" in table: del table["pandas_code"]
 
             with st.expander("🛠️ Pełna władza nad danymi (Historia operacji, Matematyka, Filtry)"):
-                st.markdown("### 📖 Ściąga z komend (Kopiuj i modyfikuj)")
-                st.info("""
-**1. Odzyskiwanie 100% z matematyki (Proporcje):**
-`df['Baza 100%'] = df['Liczba bezwzględna'] / (df['Procent Analogiczny']/100)`
-
-**2. Wyciąganie samego Roku z daty (np. 2021-01 -> 2021):**
-`df['Rok'] = df['Okres'].astype(str).str[:4]`
-
-**3. Usuwanie wierszy, które zawierają słowo POLSKA:**
-`df = df[~df['Województwo'].str.contains('POLSKA')]`
-
-**4. Zamiana przecinków na kropki i zrobienie z kolumny wartości liczbowej:**
-`df['Wartość'] = pd.to_numeric(df['Wartość'].astype(str).str.replace(',','.'), errors='coerce')`
-
-**5. Odwracanie całej tabeli (Transpozycja, gdy daty idą w prawo):**
-`df = df.T.reset_index()`
-                """)
-                
-                st.markdown("---")
                 st.markdown("### 📜 Historia Zastosowanych Zmian")
                 
                 if not table["applied_commands"]:
@@ -186,7 +167,7 @@ with tab_kreator:
                 with c_s2:
                     st.info(f"**Podział Dynamiczny Aktywny.** W raporcie powstaną automatycznie {len(unique_vals)} wykresy (dla: {', '.join(map(str, unique_vals))}). Szablon sam dostosuje się do nowych lat w przyszłości.")
                 
-                if st.button("✂️ Fizycznie rozbij tę tabelę na niezależne bloki (Użyj tylko jeśli chcesz modyfikować lata osobno)", key=f"phys_{idx}"):
+                if st.button("✂️ Fizycznie rozbij tę tabelę na osobne niezależne bloki (Rozdziel i pozwól mi każdy konfigurować z osobna!)", key=f"phys_{idx}"):
                     new_blocks = []
                     for val in unique_vals:
                         new_block = table.copy()
@@ -255,7 +236,6 @@ with tab_kreator:
                 next_num = str(max_num + 1).zfill(2)
                 py_file = f"pages/{next_num}_{safe_name}.py"
             
-            # Zapisywanie dodanej instrukcji na stałe w szablonie!
             meta_data = {
                 "tab_name": tab_name, 
                 "report_title": report_title,
@@ -337,5 +317,49 @@ with tab_menedzer:
                 shutil.move(p, f"pages/{nazwa}")
                 st.rerun()
             if c3.button("❌ Usuń trwale", key=f"del_{nazwa}"):
+                os.remove(p)
+                st.rerun()
+
+# --- ZMIANA: ZAKŁADKA TYLKO I WYŁĄCZNIE DLA GŁÓWNYCH PROMPTÓW ---
+with tab_prompty:
+    st.subheader("⚙️ Główne Instrukcje Systemowe (Mózg AI)")
+    st.info("Tutaj znajdują się instrukcje wysyłane do API Google 'pod spodem'. Możesz je edytować, jeśli chcesz zmienić zachowanie modelu. Pamiętaj, aby zostawić tagi `{custom_instruction}` i `{csv_content}` - to w ich miejsce wklejane są pliki!")
+    
+    def move_file_generic(src, dst):
+        shutil.move(src, dst)
+        st.rerun()
+        
+    for p in glob.glob("prompts/active/00_SYSTEM_*.txt"):
+        name = os.path.basename(p)
+        with st.expander(f"📄 Edytuj: {name}"):
+            with open(p, "r", encoding="utf-8") as f: content = f.read()
+            new_content = st.text_area("Treść Promptu Systemowego:", value=content, height=250, key=f"sys_{name}")
+            
+            c1, c2 = st.columns([1, 1])
+            if c1.button("💾 Zapisz Zmiany", key=f"s_{name}", type="primary"):
+                with open(p, "w", encoding="utf-8") as f: f.write(new_content)
+                st.success("Zapisano pomyślnie!")
+            if c2.button("♻️ Zarchiwizuj i Resetuj do Fabrycznych", key=f"a_{name}", help="To przeniesie Twoją modyfikację do archiwum na dole, a w to miejsce wygeneruje bezpieczny, oryginalny prompt."):
+                move_file_generic(p, f"prompts/archive/{name}_{uuid.uuid4().hex[:4]}.txt")
+                
+    st.divider()
+    st.subheader("📦 Archiwum (Kopie zapasowe Promptów)")
+    
+    zarch_prompty = glob.glob("prompts/archive/*.txt")
+    if not zarch_prompty:
+        st.caption("Brak zarchiwizowanych promptów.")
+    else:
+        for p in zarch_prompty:
+            name = os.path.basename(p)
+            c1, c2, c3 = st.columns([3, 1, 1])
+            c1.write(f"📁 {name}")
+            if c2.button("♻️ Przywróć", key=f"ur_{name}"):
+                # Oczyszczanie nazwy z kodu archiwizacji
+                restore_name = re.sub(r'_[a-f0-9]{4}\.txt$', '.txt', name)
+                # Zanim przywrócimy, warto usunąć ten aktywny, żeby go zastąpić
+                active_path = f"prompts/active/{restore_name}"
+                if os.path.exists(active_path): os.remove(active_path)
+                move_file_generic(p, active_path)
+            if c3.button("❌ Usuń trwale", key=f"ux_{name}"):
                 os.remove(p)
                 st.rerun()

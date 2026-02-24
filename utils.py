@@ -18,7 +18,23 @@ except ImportError:
 
 MONTH_ORDER = ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec', 'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień']
 
+# --- ZMIANA: Inicjalizacja twardych promptów systemowych jako plików .txt ---
+def ensure_system_prompts():
+    os.makedirs("prompts/active", exist_ok=True)
+    os.makedirs("prompts/archive", exist_ok=True)
+    
+    p_analiza = "prompts/active/00_SYSTEM_Analiza.txt"
+    if not os.path.exists(p_analiza):
+        with open(p_analiza, "w", encoding="utf-8") as f:
+            f.write('Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Wymyśl główny tytuł raportu pasujący do tych danych", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "data": [{"KolX": "A", "KolY": 1}] } ]}. Typy wykresów: line, bar, pie, scatter, area, none. UWAGA KRYTYCZNA: ZABRANIAM CI dzielić danych na kilka tabel! Masz umieścić 100% wierszy z CSV wewnątrz JEDNEJ tabeli w obiekcie "tables". Nie grupuj ich samowolnie po kategoriach. WYGENERUJ W 100% PRAWIDŁOWY SKŁADNIOWO JSON! Pamiętaj o przecinkach pomiędzy wierszami. Wszelkie cudzysłowy wewnątrz tekstu zamieniaj na apostrofy. DANE:\n{csv_content}')
+            
+    p_rebuild = "prompts/active/00_SYSTEM_Odswiezanie.txt"
+    if not os.path.exists(p_rebuild):
+        with open(p_rebuild, "w", encoding="utf-8") as f:
+            f.write('SZABLON JSON:\n{template_json}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {custom_instruction}\nZachowaj te same klucze i układ. UWAGA KRYTYCZNA: Zwrócony JSON musi mieć absolutnie nienaganną składnię. NIE WOLNO CI SAMOWOLNIE ROZDZIELAĆ DANYCH NA NOWE TABELE. Trzymaj się struktury z szablonu. Zwróć zaktualizowany JSON.')
+
 def setup_session_state():
+    ensure_system_prompts()
     if 'data_loaded' not in st.session_state:
         st.session_state.data_loaded = False
         domyslny_klucz = ""
@@ -74,7 +90,6 @@ def render_page_header(title, is_dynamic=False, meta=None, file_path=None):
                 st.session_state.builder_step = 3
                 st.session_state.edit_tab_name = meta.get("tab_name", "")
                 
-                # Zaciągamy z historii tytuł główny jeśli istnieje
                 st.session_state.edit_report_title = meta.get("report_title", meta.get("tab_name", ""))
                 st.session_state.extraction_instruction = meta.get("extraction_instruction", "")
                 
@@ -139,23 +154,76 @@ def render_dynamic_section(meta, file_path, is_in_app=False):
         display_ai_section(f"{slug}_{idx}", df.to_string())
 
 # ==========================================
-# PARSOWANIE AI I BIK
+# PARSOWANIE AI Z MECHANIZMAMI NAPRAWCZYMI I PLIKAMI
 # ==========================================
 def clean_ai_json_output(text):
     text = text.strip()
-    text = re.sub(r'^```[a-zA-Z]*\n', '', text)
+    text = re.sub(r'^```(?:json)?[a-zA-Z]*\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\n```$', '', text).strip()
-    start_idx = text.find('[') if text.startswith('[') else text.find('{')
-    end_idx = text.rfind(']') if text.endswith(']') else text.rfind('}')
-    if start_idx != -1 and end_idx != -1: return text[start_idx:end_idx+1]
+    start_idx = text.find('{')
+    if start_idx == -1: start_idx = text.find('[')
+    
+    end_idx = text.rfind('}')
+    if end_idx == -1 or text.rfind(']') > end_idx: end_idx = text.rfind(']')
+        
+    if start_idx != -1 and end_idx != -1: 
+        text = text[start_idx:end_idx+1]
+        
+    text = re.sub(r',\s*([\]}])', r'\1', text)
+    text = re.sub(r'\}\s*\{', r'}, {', text)
     return text
+
+def parse_and_repair_json(json_str):
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        try:
+            fixed_str = re.sub(r',\s*$', '', json_str) 
+            return json.loads(fixed_str + "]}]}")
+        except:
+            pass
+        try:
+            fixed_str = re.sub(r',\s*$', '', json_str)
+            return json.loads(fixed_str + "}]}")
+        except:
+            row_matches = re.findall(r'\{[^{}]+\}', json_str)
+            valid_rows = []
+            for match in row_matches:
+                try:
+                    row_data = json.loads(match.replace("'", '"'))
+                    if isinstance(row_data, dict) and len(row_data) >= 2 and "dataset_name" not in row_data:
+                        valid_rows.append(row_data)
+                except: pass
+            
+            if valid_rows:
+                return {
+                    "report_title": "Uratowane dane",
+                    "tables": [{
+                        "dataset_name": "Tabela Danych",
+                        "recommended_chart": "none",
+                        "x_axis_column": list(valid_rows[0].keys())[0],
+                        "y_axis_columns": list(valid_rows[0].keys())[1:] if len(valid_rows[0])>1 else [],
+                        "data": valid_rows
+                    }]
+                }
+            raise ValueError(f"Model AI uciął JSON. Błąd: {str(e)}")
 
 def ai_analyze_custom_sheets(csv_content, api_key, model_name, custom_instruction=""):
     genai.configure(api_key=api_key)
     instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA DO EKSTRAKCJI: {custom_instruction}\n\n" if custom_instruction else ""
-    prompt = f"Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {instr_text}Oczekiwany format: {{\"report_title\": \"Wymyśl główny tytuł raportu pasujący do tych danych\", \"tables\": [ {{\"dataset_name\": \"Nazwa\", \"recommended_chart\": \"line\", \"x_axis_column\": \"KolX\", \"y_axis_columns\": [\"KolY\"], \"data\": [{{\"KolX\": \"A\", \"KolY\": 1}}] }} ]}}. Typy wykresów: line, bar, pie, scatter, area, none. DANE:\n{csv_content}"
-    response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-    return json.loads(clean_ai_json_output(response.text))
+    
+    # --- ZMIANA: POBIERANIE Z PLIKU TXT ---
+    try:
+        with open("prompts/active/00_SYSTEM_Analiza.txt", "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+    except Exception:
+        prompt_template = 'Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Wymyśl tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "data": [{"KolX": "A", "KolY": 1}] } ]}. DANE:\n{csv_content}'
+        
+    prompt = prompt_template.replace("{custom_instruction}", instr_text).replace("{csv_content}", csv_content)
+    
+    response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json", "max_output_tokens": 8192})
+    cleaned_text = clean_ai_json_output(response.text)
+    return parse_and_repair_json(cleaned_text)
 
 def ai_rebuild_from_template(csv_content, template_json, api_key, model_name, custom_instruction=""):
     genai.configure(api_key=api_key)
@@ -164,9 +232,19 @@ def ai_rebuild_from_template(csv_content, template_json, api_key, model_name, cu
         t.pop("applied_commands", None)
         
     instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA (MUSISZ JEJ PRZESTRZEGAĆ!): {custom_instruction}\n\n" if custom_instruction else ""
-    prompt = f"SZABLON JSON:\n{json.dumps(template_json, ensure_ascii=False)}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {instr_text}Zachowaj te same klucze i układ. Zwróć tylko JSON."
-    response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-    parsed = json.loads(clean_ai_json_output(response.text))
+    
+    # --- ZMIANA: POBIERANIE Z PLIKU TXT ---
+    try:
+        with open("prompts/active/00_SYSTEM_Odswiezanie.txt", "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+    except Exception:
+        prompt_template = 'SZABLON JSON:\n{template_json}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {custom_instruction}\nZwróć zaktualizowany JSON.'
+        
+    prompt = prompt_template.replace("{template_json}", json.dumps(template_json, ensure_ascii=False)).replace("{csv_content}", csv_content).replace("{custom_instruction}", instr_text)
+    
+    response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json", "max_output_tokens": 8192})
+    cleaned_text = clean_ai_json_output(response.text)
+    parsed = parse_and_repair_json(cleaned_text)
     return parsed["tables"] if isinstance(parsed, dict) and "tables" in parsed else parsed
 
 def generate_ai_description(key, data_context, api_key, model_name, length_mode, custom_prompt=""):
@@ -199,7 +277,17 @@ def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Konfiguracja")
         st.session_state.gemini_key = st.text_input("Klucz API Gemini (Wymagany do AI)", value=st.session_state.get('gemini_key', ''), type="password")
-        st.session_state.model_name = st.selectbox("Wybierz Model AI", ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-lite"])
+        st.session_state.model_name = st.selectbox("Wybierz Model AI", [
+            "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash"
+        ])
         st.session_state.rok = st.number_input("Rok raportu", value=st.session_state.get('rok', 2025))
         st.session_state.miesiac = st.selectbox("Miesiąc raportu", MONTH_ORDER, index=MONTH_ORDER.index(st.session_state.get('miesiac', 'Grudzień')))
         
@@ -253,9 +341,8 @@ def render_sidebar():
                         if resp.status_code == 200:
                             excel = pd.ExcelFile(io.BytesIO(resp.content))
                             sheets_to_use = item['meta'].get("selected_sheets", excel.sheet_names)
-                            csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(50).to_csv(index=False)}" for s in sheets_to_use if s in excel.sheet_names])
+                            csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(60).to_csv(index=False)}" for s in sheets_to_use if s in excel.sheet_names])
                             
-                            # Pobieranie na nowo przy wykorzystaniu zdefiniowanej wcześniej instrukcji!
                             new_tables = ai_rebuild_from_template(csv_text, item['meta'].get("tables", []), st.session_state.gemini_key, st.session_state.model_name, item['meta'].get("extraction_instruction", ""))
                             if new_tables:
                                 for n_tab, old_tab in zip(new_tables, item['meta'].get("tables", [])):
