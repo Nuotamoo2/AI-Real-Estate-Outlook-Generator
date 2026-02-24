@@ -10,10 +10,10 @@ import requests
 import io
 import shutil
 import uuid
-from utils import setup_session_state, load_css, render_sidebar, clean_url, clean_ai_json_output, ai_analyze_custom_sheets
+from utils import setup_session_state, load_css, render_sidebar, clean_url, clean_ai_json_output, ai_analyze_custom_sheets, ai_rebuild_from_template
 
 st.set_page_config(page_title="Studio Zakładek", layout="wide")
-setup_session_state() # Tutaj aplikacja upewnia się, że pliki systemowe istnieją
+setup_session_state() 
 load_css()
 render_sidebar()
 
@@ -53,27 +53,45 @@ with tab_kreator:
         st.divider()
         st.subheader("2. Wybór arkuszy do analizy")
         def_sheets = [s for s in st.session_state.builder_sheets if not any(k in s.lower() for k in ['spis', 'uwag'])]
-        selected_sheets = st.multiselect("Zaznacz arkusze z danymi (AI je odczyta i ustali kolumny):", st.session_state.builder_sheets, default=def_sheets)
+        selected_sheets = st.multiselect("Zaznacz arkusze z danymi (AI wygeneruje szkielet, a my wtłoczymy dane):", st.session_state.builder_sheets, default=def_sheets)
         st.session_state.builder_selected_sheets = selected_sheets
         
-        st.markdown("### 🧠 Instrukcje czytania tabeli dla AI (Opcjonalne)")
-        extraction_instruction = st.text_area(
-            "Jeśli plik jest zawiły (np. pytania w wierszach, dziwne nagłówki), powiedz AI jak ma to potraktować:", 
-            value=st.session_state.get('extraction_instruction', ''),
-            placeholder="np. Tabela ma sekcje podzielone wierszami z pytaniami..."
-        )
-        st.session_state.extraction_instruction = extraction_instruction
+        st.markdown("### ⚙️ Sterowanie Ekstrakcją")
+        col_s1, col_s2 = st.columns([1, 1])
+        with col_s1:
+            fetch_limit = st.slider(
+                "Ilość wierszy do raportu (Odetnij opisy u dołu tabeli):", 
+                min_value=10, max_value=5000, 
+                value=st.session_state.get('fetch_limit', 300), step=10,
+                help="Wskazujesz Pandasowi ile wierszy finalnie wrzucić do tabeli. Model zignoruje ten limit i przeczyta tylko nagłówki, żeby oszczędzać tokeny!"
+            )
+            st.session_state.fetch_limit = fetch_limit
+            
+        with col_s2:
+            extraction_instruction = st.text_area(
+                "Opcjonalne instrukcje dla AI:", 
+                value=st.session_state.get('extraction_instruction', ''),
+                placeholder="np. Tabela ma sekcje podzielone wierszami z pytaniami..."
+            )
+            st.session_state.extraction_instruction = extraction_instruction
         
-        if st.button("Uruchom AI na wybranych arkuszach", type="primary"):
+        if st.button("Zbuduj Układ i wstrzyknij pełne dane (Gwarancja braku obcięć!)", type="primary"):
             if not st.session_state.gemini_key: st.error("Wymagany klucz API w panelu bocznym!")
             elif not selected_sheets: st.warning("Wybierz chociaż jeden arkusz.")
             else:
                 try:
-                    with st.spinner("AI analizuje struktury i buduje tabele... To potrwa kilka sekund."):
+                    with st.spinner("AI myśli nad układem kolumn, a Python wpycha Twoje wiersze..."):
                         excel = pd.ExcelFile(io.BytesIO(st.session_state.builder_excel))
-                        csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(60).to_csv(index=False)}" for s in selected_sheets])
                         
-                        parsed = ai_analyze_custom_sheets(csv_text, st.session_state.gemini_key, st.session_state.model_name, extraction_instruction)
+                        raw_dfs = {}
+                        csv_text = ""
+                        for s in selected_sheets:
+                            df_raw = pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(fetch_limit)
+                            raw_dfs[s] = df_raw
+                            csv_text += f"\n--- ZAKŁADKA: {s} ---\n{df_raw.head(15).to_csv(index=False)}"
+                        
+                        parsed = ai_analyze_custom_sheets(csv_text, st.session_state.gemini_key, st.session_state.model_name, extraction_instruction, raw_dfs)
+                        
                         if parsed and "tables" in parsed:
                             st.session_state.builder_data = parsed["tables"]
                             st.session_state.builder_report_title = parsed.get("report_title", "Raport z GUS")
@@ -167,7 +185,7 @@ with tab_kreator:
                 with c_s2:
                     st.info(f"**Podział Dynamiczny Aktywny.** W raporcie powstaną automatycznie {len(unique_vals)} wykresy (dla: {', '.join(map(str, unique_vals))}). Szablon sam dostosuje się do nowych lat w przyszłości.")
                 
-                if st.button("✂️ Fizycznie rozbij tę tabelę na osobne niezależne bloki (Rozdziel i pozwól mi każdy konfigurować z osobna!)", key=f"phys_{idx}"):
+                if st.button("✂️ Fizycznie rozbij tę tabelę na osobne niezależne bloki", key=f"phys_{idx}"):
                     new_blocks = []
                     for val in unique_vals:
                         new_block = table.copy()
@@ -243,6 +261,7 @@ with tab_kreator:
                 "link": st.session_state.builder_link, 
                 "selected_sheets": st.session_state.get("builder_selected_sheets", []),
                 "extraction_instruction": st.session_state.get('extraction_instruction', ''),
+                "fetch_limit": st.session_state.get('fetch_limit', 300),
                 "tables": st.session_state.builder_data
             }
             
@@ -320,10 +339,9 @@ with tab_menedzer:
                 os.remove(p)
                 st.rerun()
 
-# --- ZMIANA: ZAKŁADKA TYLKO I WYŁĄCZNIE DLA GŁÓWNYCH PROMPTÓW ---
 with tab_prompty:
     st.subheader("⚙️ Główne Instrukcje Systemowe (Mózg AI)")
-    st.info("Tutaj znajdują się instrukcje wysyłane do API Google 'pod spodem'. Możesz je edytować, jeśli chcesz zmienić zachowanie modelu. Pamiętaj, aby zostawić tagi `{custom_instruction}` i `{csv_content}` - to w ich miejsce wklejane są pliki!")
+    st.info("Jeśli potrzebujesz cokolwiek zmodyfikować, zrób to w poniższych plikach:")
     
     def move_file_generic(src, dst):
         shutil.move(src, dst)
@@ -339,7 +357,7 @@ with tab_prompty:
             if c1.button("💾 Zapisz Zmiany", key=f"s_{name}", type="primary"):
                 with open(p, "w", encoding="utf-8") as f: f.write(new_content)
                 st.success("Zapisano pomyślnie!")
-            if c2.button("♻️ Zarchiwizuj i Resetuj do Fabrycznych", key=f"a_{name}", help="To przeniesie Twoją modyfikację do archiwum na dole, a w to miejsce wygeneruje bezpieczny, oryginalny prompt."):
+            if c2.button("♻️ Zarchiwizuj i Resetuj do Fabrycznych", key=f"a_{name}"):
                 move_file_generic(p, f"prompts/archive/{name}_{uuid.uuid4().hex[:4]}.txt")
                 
     st.divider()
@@ -354,9 +372,7 @@ with tab_prompty:
             c1, c2, c3 = st.columns([3, 1, 1])
             c1.write(f"📁 {name}")
             if c2.button("♻️ Przywróć", key=f"ur_{name}"):
-                # Oczyszczanie nazwy z kodu archiwizacji
                 restore_name = re.sub(r'_[a-f0-9]{4}\.txt$', '.txt', name)
-                # Zanim przywrócimy, warto usunąć ten aktywny, żeby go zastąpić
                 active_path = f"prompts/active/{restore_name}"
                 if os.path.exists(active_path): os.remove(active_path)
                 move_file_generic(p, active_path)

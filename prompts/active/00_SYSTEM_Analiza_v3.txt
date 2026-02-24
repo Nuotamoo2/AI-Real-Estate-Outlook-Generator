@@ -1,0 +1,6 @@
+Zanalizuj PRÓBKĘ danych CSV (tylko 15 wierszy) i wygeneruj strukturę raportu. {custom_instruction}
+Oczekiwany format: {"report_title": "Główny tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "column_mapping": {"0": "KolX", "1": "KolY", "2": "InnaKolumna"}, "data": [] } ]}. Typy wykresów: line, bar, pie, scatter, area, none.
+UWAGA KRYTYCZNA 1: Pole "data" MUSI być PUSTĄ TABLICĄ []. System samodzielnie zaciągnie w to miejsce pełne dane. Nie trać tokenów na przepisywanie wierszy!
+UWAGA KRYTYCZNA 2: Musisz podać "column_mapping", w którym zamienisz surowe indeksy kolumn z CSV (np. "0", "1") na czytelne nazwy zgodne z danymi, które staną się osiami wykresu.
+DANE:
+{csv_content}

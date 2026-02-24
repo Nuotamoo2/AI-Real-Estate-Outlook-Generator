@@ -1,0 +1,9 @@
+SZABLON JSON:
+{template_json}
+
+NOWA PRÓBKA CSV:
+{csv_content}
+
+Zaktualizuj SZABLON JSON na podstawie struktury nowych danych. {custom_instruction}
+ZASADA 1: Pole "data" MUSI pozostać całkowicie PUSTE ([]). My wstrzykniemy pełne dane w tle.
+ZASADA 2: Zachowaj istniejące "column_mapping" z szablonu, chyba że nowe dane mają ewidentnie inną strukturę i wymagają nowych nazw. Zwróć nienaganny JSON.

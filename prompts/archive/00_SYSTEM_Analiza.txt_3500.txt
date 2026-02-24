@@ -1,0 +1,18 @@
+# 1. Czyszczenie ukrytych spacji w nazwach kolumn
+df.columns = [str(c).strip() for c in df.columns]
+
+# 2. Naprawa liczb (zamiana przecinków na kropki, usunięcie liter/spacji)
+df['Wartosc'] = df['Wartosc'].astype(str).str.replace(',', '.', regex=False).str.replace(' ', '', regex=False)
+df['Wartosc'] = pd.to_numeric(df['Wartosc'], errors='coerce')
+
+# 3. Wyliczenie prawdziwej zmiany % na wykres (odjęcie bazy 100)
+df['Zmiana %'] = df['Wartosc'] - 100.0
+
+# 4. Zbudowanie eleganckiej daty dla wykresu (Rok + Miesiąc)
+df['Data'] = pd.to_datetime(df['Rok'].astype(str) + '-' + df['Miesiac'].astype(str).str.replace('.0','', regex=False).str.zfill(2) + '-01').dt.strftime('%Y-%m')
+
+# 5. WYRZUCENIE zbędnych kolumn (żeby nie psuły wyglądu tabeli)
+df = df.drop(columns=['Rok', 'Miesiac'], errors='ignore')
+
+# 6. Posortowanie chronologiczne i wywalenie pustych danych
+df = df.dropna(subset=['Wartosc']).sort_values('Data')

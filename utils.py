@@ -18,20 +18,19 @@ except ImportError:
 
 MONTH_ORDER = ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec', 'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień']
 
-# --- ZMIANA: Inicjalizacja twardych promptów systemowych jako plików .txt ---
 def ensure_system_prompts():
     os.makedirs("prompts/active", exist_ok=True)
     os.makedirs("prompts/archive", exist_ok=True)
     
-    p_analiza = "prompts/active/00_SYSTEM_Analiza.txt"
+    p_analiza = "prompts/active/00_SYSTEM_Analiza_v3.txt"
     if not os.path.exists(p_analiza):
         with open(p_analiza, "w", encoding="utf-8") as f:
-            f.write('Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Wymyśl główny tytuł raportu pasujący do tych danych", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "data": [{"KolX": "A", "KolY": 1}] } ]}. Typy wykresów: line, bar, pie, scatter, area, none. UWAGA KRYTYCZNA: ZABRANIAM CI dzielić danych na kilka tabel! Masz umieścić 100% wierszy z CSV wewnątrz JEDNEJ tabeli w obiekcie "tables". Nie grupuj ich samowolnie po kategoriach. WYGENERUJ W 100% PRAWIDŁOWY SKŁADNIOWO JSON! Pamiętaj o przecinkach pomiędzy wierszami. Wszelkie cudzysłowy wewnątrz tekstu zamieniaj na apostrofy. DANE:\n{csv_content}')
+            f.write('Zanalizuj PRÓBKĘ danych CSV (tylko 15 wierszy) i wygeneruj strukturę raportu. {custom_instruction}\nOczekiwany format: {"report_title": "Główny tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "column_mapping": {"0": "KolX", "1": "KolY", "2": "InnaKolumna"}, "data": [] } ]}. Typy wykresów: line, bar, pie, scatter, area, none.\nUWAGA KRYTYCZNA 1: Pole "data" MUSI być PUSTĄ TABLICĄ []. System samodzielnie zaciągnie w to miejsce pełne dane. Nie trać tokenów na przepisywanie wierszy!\nUWAGA KRYTYCZNA 2: Musisz podać "column_mapping", w którym zamienisz surowe indeksy kolumn z CSV (np. "0", "1") na czytelne nazwy zgodne z danymi, które staną się osiami wykresu.\nDANE:\n{csv_content}')
             
-    p_rebuild = "prompts/active/00_SYSTEM_Odswiezanie.txt"
+    p_rebuild = "prompts/active/00_SYSTEM_Odswiezanie_v3.txt"
     if not os.path.exists(p_rebuild):
         with open(p_rebuild, "w", encoding="utf-8") as f:
-            f.write('SZABLON JSON:\n{template_json}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {custom_instruction}\nZachowaj te same klucze i układ. UWAGA KRYTYCZNA: Zwrócony JSON musi mieć absolutnie nienaganną składnię. NIE WOLNO CI SAMOWOLNIE ROZDZIELAĆ DANYCH NA NOWE TABELE. Trzymaj się struktury z szablonu. Zwróć zaktualizowany JSON.')
+            f.write('SZABLON JSON:\n{template_json}\n\nNOWA PRÓBKA CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON na podstawie struktury nowych danych. {custom_instruction}\nZASADA 1: Pole "data" MUSI pozostać całkowicie PUSTE ([]). My wstrzykniemy pełne dane w tle.\nZASADA 2: Zachowaj istniejące "column_mapping" z szablonu, chyba że nowe dane mają ewidentnie inną strukturę i wymagają nowych nazw. Zwróć nienaganny JSON.')
 
 def setup_session_state():
     ensure_system_prompts()
@@ -52,6 +51,7 @@ def setup_session_state():
         st.session_state.miesiac = "Grudzień"
         st.session_state.nbp_df = None
         st.session_state.nbp_date = None
+        st.session_state.fetch_limit = 300
     if 'descriptions' not in st.session_state:
         st.session_state.descriptions = {k: '' for k in ['nbp', 'bik']}
 
@@ -89,10 +89,9 @@ def render_page_header(title, is_dynamic=False, meta=None, file_path=None):
                 st.session_state.builder_data = meta.get("tables", [])
                 st.session_state.builder_step = 3
                 st.session_state.edit_tab_name = meta.get("tab_name", "")
-                
                 st.session_state.edit_report_title = meta.get("report_title", meta.get("tab_name", ""))
                 st.session_state.extraction_instruction = meta.get("extraction_instruction", "")
-                
+                st.session_state.fetch_limit = meta.get("fetch_limit", 300)
                 st.session_state.edit_tab_desc = meta.get("tab_desc", "")
                 st.session_state.edit_file_target = file_path
                 st.switch_page("pages/00_AI_Panel.py")
@@ -153,9 +152,6 @@ def render_dynamic_section(meta, file_path, is_in_app=False):
             
         display_ai_section(f"{slug}_{idx}", df.to_string())
 
-# ==========================================
-# PARSOWANIE AI Z MECHANIZMAMI NAPRAWCZYMI I PLIKAMI
-# ==========================================
 def clean_ai_json_output(text):
     text = text.strip()
     text = re.sub(r'^```(?:json)?[a-zA-Z]*\n', '', text, flags=re.IGNORECASE)
@@ -176,76 +172,81 @@ def clean_ai_json_output(text):
 def parse_and_repair_json(json_str):
     try:
         return json.loads(json_str)
-    except json.JSONDecodeError as e:
+    except Exception as e:
         try:
             fixed_str = re.sub(r',\s*$', '', json_str) 
             return json.loads(fixed_str + "]}]}")
         except:
-            pass
-        try:
-            fixed_str = re.sub(r',\s*$', '', json_str)
-            return json.loads(fixed_str + "}]}")
-        except:
-            row_matches = re.findall(r'\{[^{}]+\}', json_str)
-            valid_rows = []
-            for match in row_matches:
-                try:
-                    row_data = json.loads(match.replace("'", '"'))
-                    if isinstance(row_data, dict) and len(row_data) >= 2 and "dataset_name" not in row_data:
-                        valid_rows.append(row_data)
-                except: pass
-            
-            if valid_rows:
-                return {
-                    "report_title": "Uratowane dane",
-                    "tables": [{
-                        "dataset_name": "Tabela Danych",
-                        "recommended_chart": "none",
-                        "x_axis_column": list(valid_rows[0].keys())[0],
-                        "y_axis_columns": list(valid_rows[0].keys())[1:] if len(valid_rows[0])>1 else [],
-                        "data": valid_rows
-                    }]
-                }
-            raise ValueError(f"Model AI uciął JSON. Błąd: {str(e)}")
+            raise ValueError(f"AI zwróciło totalnie uszkodzony JSON. Spróbuj ponownie. Błąd: {str(e)}")
 
-def ai_analyze_custom_sheets(csv_content, api_key, model_name, custom_instruction=""):
+def ai_analyze_custom_sheets(csv_content, api_key, model_name, custom_instruction="", raw_dfs=None):
     genai.configure(api_key=api_key)
     instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA DO EKSTRAKCJI: {custom_instruction}\n\n" if custom_instruction else ""
     
-    # --- ZMIANA: POBIERANIE Z PLIKU TXT ---
     try:
-        with open("prompts/active/00_SYSTEM_Analiza.txt", "r", encoding="utf-8") as f:
+        with open("prompts/active/00_SYSTEM_Analiza_v3.txt", "r", encoding="utf-8") as f:
             prompt_template = f.read()
     except Exception:
-        prompt_template = 'Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Wymyśl tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "data": [{"KolX": "A", "KolY": 1}] } ]}. DANE:\n{csv_content}'
+        prompt_template = 'Zanalizuj próbkę CSV do JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "X", "y_axis_columns": ["Y"], "column_mapping": {"0": "X", "1": "Y"}, "data": [] } ]}. DANE:\n{csv_content}'
         
     prompt = prompt_template.replace("{custom_instruction}", instr_text).replace("{csv_content}", csv_content)
     
     response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json", "max_output_tokens": 8192})
     cleaned_text = clean_ai_json_output(response.text)
-    return parse_and_repair_json(cleaned_text)
+    parsed = parse_and_repair_json(cleaned_text)
+    
+    if raw_dfs and isinstance(parsed, dict) and "tables" in parsed:
+        for idx, table in enumerate(parsed["tables"]):
+            sheet_name = list(raw_dfs.keys())[idx] if idx < len(raw_dfs) else list(raw_dfs.keys())[0]
+            df = raw_dfs[sheet_name].copy()
+            
+            mapping = table.get("column_mapping", {})
+            if mapping:
+                mapping_clean = {int(k) if str(k).isdigit() else k: str(v) for k, v in mapping.items()}
+                df.rename(columns=mapping_clean, inplace=True)
+                
+            table["data"] = df.to_dict(orient="records")
+            
+    return parsed
 
-def ai_rebuild_from_template(csv_content, template_json, api_key, model_name, custom_instruction=""):
+def ai_rebuild_from_template(csv_content, template_json, api_key, model_name, custom_instruction="", raw_dfs=None):
     genai.configure(api_key=api_key)
     for t in template_json: 
         t.pop("pandas_code", None)
         t.pop("applied_commands", None)
+        t["data"] = []
         
     instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA (MUSISZ JEJ PRZESTRZEGAĆ!): {custom_instruction}\n\n" if custom_instruction else ""
     
-    # --- ZMIANA: POBIERANIE Z PLIKU TXT ---
     try:
-        with open("prompts/active/00_SYSTEM_Odswiezanie.txt", "r", encoding="utf-8") as f:
+        with open("prompts/active/00_SYSTEM_Odswiezanie_v3.txt", "r", encoding="utf-8") as f:
             prompt_template = f.read()
     except Exception:
-        prompt_template = 'SZABLON JSON:\n{template_json}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {custom_instruction}\nZwróć zaktualizowany JSON.'
+        prompt_template = 'SZABLON JSON:\n{template_json}\n\nNOWA PRÓBKA CSV:\n{csv_content}\n\nZaktualizuj układ SZABLONU JSON. {custom_instruction}\nZwróć idealny JSON.'
         
     prompt = prompt_template.replace("{template_json}", json.dumps(template_json, ensure_ascii=False)).replace("{csv_content}", csv_content).replace("{custom_instruction}", instr_text)
     
     response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json", "max_output_tokens": 8192})
     cleaned_text = clean_ai_json_output(response.text)
     parsed = parse_and_repair_json(cleaned_text)
-    return parsed["tables"] if isinstance(parsed, dict) and "tables" in parsed else parsed
+    new_tables = parsed["tables"] if isinstance(parsed, dict) and "tables" in parsed else parsed
+    
+    if raw_dfs and isinstance(new_tables, list):
+        for idx, table in enumerate(new_tables):
+            sheet_name = list(raw_dfs.keys())[idx] if idx < len(raw_dfs) else list(raw_dfs.keys())[0]
+            df = raw_dfs[sheet_name].copy()
+            
+            mapping = table.get("column_mapping", {})
+            if not mapping and idx < len(template_json):
+                mapping = template_json[idx].get("column_mapping", {})
+                
+            if mapping:
+                mapping_clean = {int(k) if str(k).isdigit() else k: str(v) for k, v in mapping.items()}
+                df.rename(columns=mapping_clean, inplace=True)
+                
+            table["data"] = df.to_dict(orient="records")
+            
+    return new_tables
 
 def generate_ai_description(key, data_context, api_key, model_name, length_mode, custom_prompt=""):
     if not HAS_GENAI or not api_key: return
@@ -270,23 +271,12 @@ def render_bik_section(title, url):
     clean_url_b = f"{clean_url(url)}?:showVizHome=no&:embed=true&:toolbar=no&:size=1200,1100"
     st.markdown(f'<div style="margin-bottom: 40px;"><h4 style="margin: 0 0 10px 0;">{title}</h4><iframe src="{clean_url_b}" width="100%" height="1150" style="border:none; overflow:hidden;" scrolling="no"></iframe></div>', unsafe_allow_html=True)
 
-# ==========================================
-# PANEL BOCZNY & GŁÓWNA PĘTLA POBIERANIA
-# ==========================================
 def render_sidebar():
     with st.sidebar:
         st.header("⚙️ Konfiguracja")
         st.session_state.gemini_key = st.text_input("Klucz API Gemini (Wymagany do AI)", value=st.session_state.get('gemini_key', ''), type="password")
         st.session_state.model_name = st.selectbox("Wybierz Model AI", [
-            "gemini-3.1-pro-preview",
-            "gemini-3-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-pro",
-            "gemini-1.5-flash"
+            "gemini-2.5-flash", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"
         ])
         st.session_state.rok = st.number_input("Rok raportu", value=st.session_state.get('rok', 2025))
         st.session_state.miesiac = st.selectbox("Miesiąc raportu", MONTH_ORDER, index=MONTH_ORDER.index(st.session_state.get('miesiac', 'Grudzień')))
@@ -295,7 +285,6 @@ def render_sidebar():
         st.info("Twoje Dynamiczne Moduły (Linki):")
         
         dodatkowe = [f for f in glob.glob("pages/*.py") if re.search(r'\d{2}_', f) and "00_AI_Panel" not in f and "NBP" not in f and "Rynek_Kredytowy" not in f]
-        
         lista_plikow_ai = []
         for plik in sorted(dodatkowe):
             try:
@@ -304,10 +293,7 @@ def render_sidebar():
                 if meta_match:
                     meta = json.loads(meta_match.group(1))
                     slug = re.sub(r'^\d+_', '', os.path.basename(plik)).replace('.py', '')
-                    
-                    if meta.get("tab_desc"): 
-                        st.caption(f"📍 {meta.get('tab_desc')}")
-                        
+                    if meta.get("tab_desc"): st.caption(f"📍 {meta.get('tab_desc')}")
                     st.session_state[f"link_{slug}"] = st.text_input(f"{meta.get('tab_name')}", value=st.session_state.get(f"link_{slug}", meta.get("link", "")))
                     lista_plikow_ai.append({"slug": slug, "meta": meta, "link": st.session_state[f"link_{slug}"]})
             except: pass
@@ -317,7 +303,6 @@ def render_sidebar():
             if not st.session_state.gemini_key: 
                 st.error("❗ Wpisz Klucz API Gemini (AI)!")
                 return
-                
             try:
                 r = requests.get("https://static.nbp.pl/dane/stopy/stopy_procentowe_archiwum.xml", headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
                 root = ET.fromstring(r.content)
@@ -333,7 +318,6 @@ def render_sidebar():
             for idx, item in enumerate(lista_plikow_ai):
                 status_text.text(f"Zaciąganie i analiza przez AI: {item['meta'].get('tab_name')}...")
                 progress_bar.progress((idx) / len(lista_plikow_ai))
-                
                 dyn_link = item['link']
                 if dyn_link and str(dyn_link).strip() != "":
                     try:
@@ -341,9 +325,17 @@ def render_sidebar():
                         if resp.status_code == 200:
                             excel = pd.ExcelFile(io.BytesIO(resp.content))
                             sheets_to_use = item['meta'].get("selected_sheets", excel.sheet_names)
-                            csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(60).to_csv(index=False)}" for s in sheets_to_use if s in excel.sheet_names])
+                            f_limit = item['meta'].get("fetch_limit", st.session_state.get('fetch_limit', 300))
                             
-                            new_tables = ai_rebuild_from_template(csv_text, item['meta'].get("tables", []), st.session_state.gemini_key, st.session_state.model_name, item['meta'].get("extraction_instruction", ""))
+                            raw_dfs = {}
+                            csv_text = ""
+                            for s in sheets_to_use:
+                                if s in excel.sheet_names:
+                                    df_raw = pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(f_limit)
+                                    raw_dfs[s] = df_raw
+                                    csv_text += f"\n--- ZAKŁADKA: {s} ---\n{df_raw.head(15).to_csv(index=False)}"
+                            
+                            new_tables = ai_rebuild_from_template(csv_text, item['meta'].get("tables", []), st.session_state.gemini_key, st.session_state.model_name, item['meta'].get("extraction_instruction", ""), raw_dfs)
                             if new_tables:
                                 for n_tab, old_tab in zip(new_tables, item['meta'].get("tables", [])):
                                     if "applied_commands" in old_tab: n_tab["applied_commands"] = old_tab["applied_commands"]
