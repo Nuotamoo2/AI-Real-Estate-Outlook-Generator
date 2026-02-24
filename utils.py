@@ -73,29 +73,40 @@ def render_page_header(title, is_dynamic=False, meta=None, file_path=None):
                 st.session_state.builder_data = meta.get("tables", [])
                 st.session_state.builder_step = 3
                 st.session_state.edit_tab_name = meta.get("tab_name", "")
+                
+                # Zaciągamy z historii tytuł główny jeśli istnieje
+                st.session_state.edit_report_title = meta.get("report_title", meta.get("tab_name", ""))
+                st.session_state.extraction_instruction = meta.get("extraction_instruction", "")
+                
                 st.session_state.edit_tab_desc = meta.get("tab_desc", "")
                 st.session_state.edit_file_target = file_path
                 st.switch_page("pages/00_AI_Panel.py")
 
 def render_dynamic_section(meta, file_path, is_in_app=False):
     tab_name = meta.get("tab_name", "Raport")
+    report_title = meta.get("report_title", tab_name)
+    
     slug = re.sub(r'^\d+_', '', os.path.basename(file_path)).replace('.py', '')
     tables_to_render = st.session_state.get(f"dynamic_data_{slug}", meta.get("tables", []))
     
-    render_page_header(tab_name, is_dynamic=True, meta=meta, file_path=file_path)
+    render_page_header(report_title, is_dynamic=True, meta=meta, file_path=file_path)
         
     for idx, table in enumerate(tables_to_render):
-        df = pd.DataFrame(table.get("data", []))
-        if df.empty: continue
+        df_base = pd.DataFrame(table.get("data", []))
+        if df_base.empty: continue
 
-        pandas_code = table.get("pandas_code", "")
-        if pandas_code:
+        applied_commands = table.get("applied_commands", [])
+        if not applied_commands and table.get("pandas_code"):
+            applied_commands = [c.strip() for c in table.get("pandas_code").split('\n') if c.strip()]
+
+        df_mod = df_base.copy()
+        for cmd in applied_commands:
             try:
-                local_vars = {"df": df, "pd": pd, "np": np}
-                exec(pandas_code, globals(), local_vars)
-                df = local_vars["df"]
-            except Exception as e:
-                st.error(f"Błąd wykonania zapisanego kodu Python dla tabeli: {e}")
+                local_vars = {"df": df_mod, "pd": pd, "np": np}
+                exec(cmd, globals(), local_vars)
+                df_mod = local_vars["df"]
+            except Exception: pass
+        df = df_mod
 
         split_col = table.get("split_by_column", "")
         if split_col and split_col in df.columns:
@@ -139,16 +150,21 @@ def clean_ai_json_output(text):
     if start_idx != -1 and end_idx != -1: return text[start_idx:end_idx+1]
     return text
 
-def ai_analyze_custom_sheets(csv_content, api_key, model_name):
+def ai_analyze_custom_sheets(csv_content, api_key, model_name, custom_instruction=""):
     genai.configure(api_key=api_key)
-    prompt = f"Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. Oczekiwany format: {{\"tables\": [ {{\"dataset_name\": \"Nazwa\", \"recommended_chart\": \"line\", \"x_axis_column\": \"KolX\", \"y_axis_columns\": [\"KolY\"], \"data\": [{{\"KolX\": \"A\", \"KolY\": 1}}] }} ]}}. Typy wykresów: line, bar, pie, scatter, area, none. DANE:\n{csv_content}"
+    instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA DO EKSTRAKCJI: {custom_instruction}\n\n" if custom_instruction else ""
+    prompt = f"Zanalizuj poniższe dane CSV i wyodrębnij tabele do formatu JSON. {instr_text}Oczekiwany format: {{\"report_title\": \"Wymyśl główny tytuł raportu pasujący do tych danych\", \"tables\": [ {{\"dataset_name\": \"Nazwa\", \"recommended_chart\": \"line\", \"x_axis_column\": \"KolX\", \"y_axis_columns\": [\"KolY\"], \"data\": [{{\"KolX\": \"A\", \"KolY\": 1}}] }} ]}}. Typy wykresów: line, bar, pie, scatter, area, none. DANE:\n{csv_content}"
     response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     return json.loads(clean_ai_json_output(response.text))
 
-def ai_rebuild_from_template(csv_content, template_json, api_key, model_name):
+def ai_rebuild_from_template(csv_content, template_json, api_key, model_name, custom_instruction=""):
     genai.configure(api_key=api_key)
-    for t in template_json: t.pop("pandas_code", None)
-    prompt = f"SZABLON JSON:\n{json.dumps(template_json, ensure_ascii=False)}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. Zachowaj te same klucze i układ. Zwróć tylko JSON."
+    for t in template_json: 
+        t.pop("pandas_code", None)
+        t.pop("applied_commands", None)
+        
+    instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA (MUSISZ JEJ PRZESTRZEGAĆ!): {custom_instruction}\n\n" if custom_instruction else ""
+    prompt = f"SZABLON JSON:\n{json.dumps(template_json, ensure_ascii=False)}\n\nNOWE DANE CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON używając NOWYCH DANYCH z pliku CSV. {instr_text}Zachowaj te same klucze i układ. Zwróć tylko JSON."
     response = genai.GenerativeModel(model_name).generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     parsed = json.loads(clean_ai_json_output(response.text))
     return parsed["tables"] if isinstance(parsed, dict) and "tables" in parsed else parsed
@@ -199,7 +215,6 @@ def render_sidebar():
                 meta_match = re.search(r'# === META START ===\nMETA_JSON = r"""(.*?)"""\n# === META END ===', content, re.DOTALL)
                 if meta_match:
                     meta = json.loads(meta_match.group(1))
-                    # NOWY SYSTEM IDENTYFIKACJI - eliminuje konflikty zmiennych przy takich samych nazwach zakladek
                     slug = re.sub(r'^\d+_', '', os.path.basename(plik)).replace('.py', '')
                     
                     if meta.get("tab_desc"): 
@@ -240,10 +255,12 @@ def render_sidebar():
                             sheets_to_use = item['meta'].get("selected_sheets", excel.sheet_names)
                             csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(50).to_csv(index=False)}" for s in sheets_to_use if s in excel.sheet_names])
                             
-                            new_tables = ai_rebuild_from_template(csv_text, item['meta'].get("tables", []), st.session_state.gemini_key, st.session_state.model_name)
+                            # Pobieranie na nowo przy wykorzystaniu zdefiniowanej wcześniej instrukcji!
+                            new_tables = ai_rebuild_from_template(csv_text, item['meta'].get("tables", []), st.session_state.gemini_key, st.session_state.model_name, item['meta'].get("extraction_instruction", ""))
                             if new_tables:
                                 for n_tab, old_tab in zip(new_tables, item['meta'].get("tables", [])):
-                                    if "pandas_code" in old_tab: n_tab["pandas_code"] = old_tab["pandas_code"]
+                                    if "applied_commands" in old_tab: n_tab["applied_commands"] = old_tab["applied_commands"]
+                                    elif "pandas_code" in old_tab: n_tab["pandas_code"] = old_tab["pandas_code"]
                                     if "split_by_column" in old_tab: n_tab["split_by_column"] = old_tab["split_by_column"]
                                 st.session_state[f"dynamic_data_{item['slug']}"] = new_tables
                     except Exception as e:
@@ -252,78 +269,3 @@ def render_sidebar():
             progress_bar.progress(1.0)
             status_text.text("Sukces! Wszystkie moduły zaktualizowane.")
             st.session_state.data_loaded = True
-
-def generate_full_html_report(session_state):
-    html = """
-    <!DOCTYPE html>
-    <html lang="pl">
-    <head>
-        <meta charset="UTF-8">
-        <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
-        <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
-        <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
-        <style>
-            body { font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; color: #333; }
-            h1 { border-bottom: 3px solid #2c3e50; padding-bottom: 10px; color: #2c3e50; }
-            h2 { margin-top: 40px; border-bottom: 2px solid #eee; padding-bottom: 5px; color: #34495e; }
-            .gus-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 30px; }
-            .gus-table th { background-color: #e6e6e6; border: 1px solid #a0a0a0; padding: 8px; }
-            .gus-table td { border: 1px solid #d0d0d0; padding: 8px; text-align: center; }
-            .print-btn { background:#FF4B4B; color:white; padding:15px; border:none; border-radius:8px; width:100%; cursor:pointer; font-size:18px; font-weight:bold; margin-bottom: 30px; }
-            @media print { .print-btn { display: none; } body { margin: 0; } }
-        </style>
-    </head>
-    <body>
-        <button class="print-btn" onclick="window.print()">🖨️ DRUKUJ / ZAPISZ JAKO PDF</button>
-        <h1>Inteligentny Raport Rynku Nieruchomości</h1>
-    """
-
-    if session_state.nbp_df is not None:
-        html += "<h2>Stopy Procentowe NBP</h2>"
-        html += session_state.nbp_df.to_html(classes='gus-table', index=False)
-
-    dodatkowe = sorted([f for f in glob.glob("pages/*.py") if re.search(r'\d{2}_', f) and "00_AI_Panel" not in f])
-    for i, plik in enumerate(dodatkowe):
-        try:
-            with open(plik, "r", encoding="utf-8") as file: content = file.read()
-            meta_match = re.search(r'# === META START ===\nMETA_JSON = r"""(.*?)"""\n# === META END ===', content, re.DOTALL)
-            if meta_match:
-                meta = json.loads(meta_match.group(1))
-                slug = re.sub(r'^\d+_', '', os.path.basename(plik)).replace('.py', '')
-                html += f"<h2>{meta.get('tab_name')}</h2>"
-                
-                for j, table in enumerate(session_state.get(f"dynamic_data_{slug}", meta.get("tables", []))):
-                    df = pd.DataFrame(table.get("data", []))
-                    if df.empty: continue
-                    
-                    pandas_code = table.get("pandas_code", "")
-                    if pandas_code:
-                        try:
-                            local_vars = {"df": df, "pd": pd, "np": np}
-                            exec(pandas_code, globals(), local_vars)
-                            df = local_vars["df"]
-                        except Exception: pass
-                        
-                    split_col = table.get("split_by_column", "")
-                    if split_col and split_col in df.columns:
-                        unique_vals = sorted(df[split_col].dropna().unique())
-                        df_list = [(f"{table.get('dataset_name', '')} - {val}", df[df[split_col] == val]) for val in unique_vals]
-                    else:
-                        df_list = [(table.get('dataset_name', ''), df)]
-                        
-                    for sub_idx, (sub_title, sub_df) in enumerate(df_list):
-                        if sub_df.empty: continue
-                        html += f"<h3>{sub_title}</h3>"
-                        t_chart, t_x, t_y = table.get("recommended_chart", "none"), table.get("x_axis_column"), table.get("y_axis_columns", [])
-                        if t_chart != "none" and t_x and t_y and t_x in sub_df.columns and all(y in sub_df.columns for y in t_y):
-                            df_plot = sub_df.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
-                            c = alt.Chart(df_plot)
-                            if t_chart == "line": c = c.mark_line(point=True).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                            elif t_chart == "bar": c = c.mark_bar().encode(x=alt.X(t_x, sort='-y'), y='Wartość', color='Legenda')
-                            elif t_chart == "pie": c = alt.Chart(sub_df).mark_arc().encode(color=t_x, theta=t_y[0])
-                            html += f"<div id='chart_{i}_{j}_{sub_idx}'></div><script>vegaEmbed('#chart_{i}_{j}_{sub_idx}', {c.to_json()});</script>"
-                        html += sub_df.to_html(classes='gus-table', index=False)
-        except: pass
-            
-    html += "</body></html>"
-    return html

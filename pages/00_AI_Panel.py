@@ -9,6 +9,7 @@ import json
 import requests
 import io
 import shutil
+import uuid
 from utils import setup_session_state, load_css, render_sidebar, clean_url, clean_ai_json_output, ai_analyze_custom_sheets
 
 st.set_page_config(page_title="Studio Zakładek", layout="wide")
@@ -53,6 +54,15 @@ with tab_kreator:
         selected_sheets = st.multiselect("Zaznacz arkusze z danymi (AI je odczyta i ustali kolumny):", st.session_state.builder_sheets, default=def_sheets)
         st.session_state.builder_selected_sheets = selected_sheets
         
+        # --- NOWE: Instrukcja dla AI, jak czytać trudne tabele ---
+        st.markdown("### 🧠 Instrukcje czytania tabeli dla AI (Opcjonalne)")
+        extraction_instruction = st.text_area(
+            "Jeśli plik jest zawiły (np. pytania w wierszach, dziwne nagłówki), powiedz AI jak ma to potraktować:", 
+            value=st.session_state.get('extraction_instruction', ''),
+            placeholder="np. Tabela ma sekcje podzielone wierszami z pytaniami (1. Jakie są...). Utwórz nową kolumnę 'Pytanie' i przepisz tam te nagłówki dla wierszy poniżej."
+        )
+        st.session_state.extraction_instruction = extraction_instruction
+        
         if st.button("Uruchom AI na wybranych arkuszach", type="primary"):
             if not st.session_state.gemini_key: st.error("Wymagany klucz API w panelu bocznym!")
             elif not selected_sheets: st.warning("Wybierz chociaż jeden arkusz.")
@@ -62,9 +72,11 @@ with tab_kreator:
                         excel = pd.ExcelFile(io.BytesIO(st.session_state.builder_excel))
                         csv_text = "".join([f"\n--- ZAKŁADKA: {s} ---\n{pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(50).to_csv(index=False)}" for s in selected_sheets])
                         
-                        parsed = ai_analyze_custom_sheets(csv_text, st.session_state.gemini_key, st.session_state.model_name)
+                        # Przekazujemy nową instrukcję!
+                        parsed = ai_analyze_custom_sheets(csv_text, st.session_state.gemini_key, st.session_state.model_name, extraction_instruction)
                         if parsed and "tables" in parsed:
                             st.session_state.builder_data = parsed["tables"]
+                            st.session_state.builder_report_title = parsed.get("report_title", "Raport z GUS")
                             st.session_state.builder_step = 3
                         else: st.error("AI nie odnalazło tabel w pliku. Wybierz inne arkusze.")
                 except Exception as e:
@@ -74,7 +86,13 @@ with tab_kreator:
         st.divider()
         st.subheader("3. Edytor Układu i Danych (Tworzenie Szablonu)")
         
-        tab_name = st.text_input("Nazwa nowej zakładki w menu (Oraz tytuł w raporcie):", value=st.session_state.get('edit_tab_name', "Nowy Raport"))
+        col_title1, col_title2 = st.columns(2)
+        with col_title1:
+            tab_name = st.text_input("Nazwa nowej zakładki (w panelu po lewej):", value=st.session_state.get('edit_tab_name', "Nowy Raport"))
+        with col_title2:
+            default_report_title = st.session_state.get('edit_report_title', st.session_state.get('builder_report_title', "Nowy Raport"))
+            report_title = st.text_input("Tytuł w raporcie (główny nagłówek strony):", value=default_report_title)
+            
         tab_desc = st.text_input("Opis ścieżki (Instrukcja wyświetlana TYLKO w lewym menu nad linkiem):", value=st.session_state.get('edit_tab_desc', "GUS -> Obszary tematyczne -> ..."))
         
         for idx, table in enumerate(st.session_state.builder_data):
@@ -82,42 +100,78 @@ with tab_kreator:
             new_table_name = st.text_input(f"Tytuł powyższej sekcji", value=table.get("dataset_name", f"Tabela {idx+1}"), key=f"t_name_{idx}")
             st.session_state.builder_data[idx]["dataset_name"] = new_table_name
             
-            df = pd.DataFrame(table.get("data", []))
-            if df.empty: continue
+            df_base = pd.DataFrame(table.get("data", []))
+            if df_base.empty: continue
             
-            # ==============================================================
-            # KONSOLA PYTHON - PEŁNA WŁADZA NAD DANYMI
-            # ==============================================================
-            with st.expander("🛠️ Pełna władza nad danymi (Matematyka, Obracanie tabeli, Filtry)"):
-                st.markdown("Napisz kod w języku Python. Twoja tabela to zmienna `df`.")
-                st.info("""**Przykłady dla Twoich problemów:**
-- **Wyciąganie Roku z daty 2021-01:** `df['Rok'] = df['Okres'].astype(str).str[:4]`
-- **Odzyskiwanie 100% z matematyki:** `df['Baza 100%'] = df['W tys. etatów'] / (df['Analogiczny okres']/100)`
-- **Odwrócenie tabeli (gdy dane idą w prawo):** `df = df.T`""")
-                
-                code_key = f"code_{idx}"
-                if code_key not in st.session_state:
-                    st.session_state[code_key] = table.get("pandas_code", "")
-                
-                new_code = st.text_area("Twój kod (zostanie na stałe przypisany do tej tabeli):", value=st.session_state[code_key], height=80, key=f"ta_{idx}")
-                
-                if st.button("▶️ Uruchom kod / Oblicz", key=f"btn_code_{idx}"):
-                    st.session_state.builder_data[idx]["pandas_code"] = new_code
-                    st.session_state[code_key] = new_code
-                    st.rerun()
+            if "applied_commands" not in table:
+                old_code = table.get("pandas_code", "")
+                table["applied_commands"] = [c.strip() for c in old_code.split('\n') if c.strip()]
+                if "pandas_code" in table: del table["pandas_code"]
 
-            # Wykonanie kodu w podglądzie
-            if table.get("pandas_code"):
+            with st.expander("🛠️ Pełna władza nad danymi (Historia operacji, Matematyka, Filtry)"):
+                st.markdown("### 📖 Ściąga z komend (Kopiuj i modyfikuj)")
+                st.info("""
+**1. Odzyskiwanie 100% z matematyki (Proporcje):**
+`df['Baza 100%'] = df['Liczba bezwzględna'] / (df['Procent Analogiczny']/100)`
+
+**2. Wyciąganie samego Roku z daty (np. 2021-01 -> 2021):**
+`df['Rok'] = df['Okres'].astype(str).str[:4]`
+
+**3. Usuwanie wierszy, które zawierają słowo POLSKA:**
+`df = df[~df['Województwo'].str.contains('POLSKA')]`
+
+**4. Zamiana przecinków na kropki i zrobienie z kolumny wartości liczbowej:**
+`df['Wartość'] = pd.to_numeric(df['Wartość'].astype(str).str.replace(',','.'), errors='coerce')`
+
+**5. Odwracanie całej tabeli (Transpozycja, gdy daty idą w prawo):**
+`df = df.T.reset_index()`
+                """)
+                
+                st.markdown("---")
+                st.markdown("### 📜 Historia Zastosowanych Zmian")
+                
+                if not table["applied_commands"]:
+                    st.caption("Brak zastosowanych zmian. Tabela jest w oryginalnym formacie.")
+                else:
+                    for i, cmd in enumerate(table["applied_commands"]):
+                        c_cmd, c_del = st.columns([5, 1])
+                        c_cmd.code(cmd, language="python")
+                        
+                        del_key = f"del_confirm_{idx}_{i}"
+                        if st.session_state.get(del_key, False):
+                            c_del.warning("Na pewno?")
+                            c_y, c_n = c_del.columns(2)
+                            if c_y.button("✔️", key=f"y_{idx}_{i}"):
+                                table["applied_commands"].pop(i)
+                                st.session_state[del_key] = False
+                                st.rerun()
+                            if c_n.button("❌", key=f"n_{idx}_{i}"):
+                                st.session_state[del_key] = False
+                                st.rerun()
+                        else:
+                            if c_del.button("🗑️ Usuń", key=f"del_{idx}_{i}", use_container_width=True):
+                                st.session_state[del_key] = True
+                                st.rerun()
+
+                st.markdown("---")
+                st.markdown("### ➕ Dodaj nową operację")
+                new_cmd = st.text_area("Wpisz komendę Python (Twoja tabela to zmienna `df`):", height=68, key=f"new_cmd_{idx}")
+                
+                if st.button("▶️ Dodaj i Oblicz nową operację", key=f"btn_add_cmd_{idx}", type="primary"):
+                    if new_cmd.strip():
+                        table["applied_commands"].append(new_cmd.strip())
+                        st.rerun()
+
+            df_mod = df_base.copy()
+            for cmd in table["applied_commands"]:
                 try:
-                    local_vars = {"df": df, "pd": pd, "np": np}
-                    exec(table["pandas_code"], globals(), local_vars)
-                    df = local_vars["df"]
+                    local_vars = {"df": df_mod, "pd": pd, "np": np}
+                    exec(cmd, globals(), local_vars)
+                    df_mod = local_vars["df"]
                 except Exception as e:
-                    st.error(f"Błąd w Twoim kodzie Python: {e}")
+                    st.error(f"⚠️ Błąd wykonania komendy: `{cmd}`\nSzczegóły: {e}")
+            df = df_mod
 
-            # ==============================================================
-            # SYSTEM PODZIAŁU TABEL (SPLIT)
-            # ==============================================================
             kolumny = df.columns.tolist()
             split_cols = ["Brak"] + kolumny
             split_val = table.get("split_by_column", "Brak")
@@ -127,29 +181,23 @@ with tab_kreator:
                 split_sel = st.selectbox("🗂️ Grupuj/Podziel tabele według kolumny (np. Rok):", split_cols, index=split_cols.index(split_val) if split_val in split_cols else 0, key=f"split_{idx}")
                 st.session_state.builder_data[idx]["split_by_column"] = "" if split_sel == "Brak" else split_sel
 
-            # Jeśli wybrano podział, pokazujemy ostrzeżenia i przycisk FIZYCZNEGO rozbicia
             if split_sel != "Brak" and split_sel in df.columns:
                 unique_vals = sorted(df[split_sel].dropna().unique())
                 with c_s2:
                     st.info(f"**Podział Dynamiczny Aktywny.** W raporcie powstaną automatycznie {len(unique_vals)} wykresy (dla: {', '.join(map(str, unique_vals))}). Szablon sam dostosuje się do nowych lat w przyszłości.")
                 
-                if st.button("✂️ Fizycznie rozbij tę tabelę na osobne niezależne bloki (Rozdziel i pozwól mi każdy konfigurować z osobna!)", key=f"phys_{idx}"):
+                if st.button("✂️ Fizycznie rozbij tę tabelę na niezależne bloki (Użyj tylko jeśli chcesz modyfikować lata osobno)", key=f"phys_{idx}"):
                     new_blocks = []
                     for val in unique_vals:
                         new_block = table.copy()
                         new_block['dataset_name'] = f"{table.get('dataset_name', '')} - {val}"
-                        new_block['data'] = df[df[split_sel] == val].to_dict('records')
-                        new_block['split_by_column'] = "" # Usuwamy grupowanie w dzieciach
-                        # Kod python zostaje dziedziczony!
+                        new_block['data'] = df_base[df_base[split_sel] == val].to_dict('records') if split_sel in df_base.columns else df_base.to_dict('records')
+                        new_block['split_by_column'] = "" 
                         new_blocks.append(new_block)
-                    
                     st.session_state.builder_data = st.session_state.builder_data[:idx] + new_blocks + st.session_state.builder_data[idx+1:]
                     st.rerun()
 
             st.markdown("---")
-            # ==============================================================
-            # KONFIGURACJA WYKRESU I DANYCH
-            # ==============================================================
             c1, c2 = st.columns([1, 2])
             with c1:
                 t_chart = st.selectbox(f"Typ wykresu", ["line", "bar", "pie", "scatter", "area", "none"], index=["line", "bar", "pie", "scatter", "area", "none"].index(table.get("recommended_chart", "none")) if table.get("recommended_chart") in ["line", "bar", "pie", "scatter", "area", "none"] else 0, key=f"c_{idx}")
@@ -166,39 +214,39 @@ with tab_kreator:
                     st.session_state.builder_data.pop(idx); st.rerun()
                     
             with c2:
-                # PODGLĄD NA ŻYWO (Z uwzględnieniem opcji Podziału Dynamicznego)
                 if split_sel != "Brak" and split_sel in df.columns:
                     st.caption(f"Podgląd (Pokazuję tylko pierwszy element z podziału: {unique_vals[0]})")
                     df_preview = df[df[split_sel] == unique_vals[0]]
                 else:
                     df_preview = df
 
-                edited_df = st.data_editor(df_preview, num_rows="dynamic", use_container_width=True, key=f"ed_{idx}")
+                st.dataframe(df_preview, use_container_width=True)
                 
-                # Zapisujemy parametry konfiguracji
                 st.session_state.builder_data[idx]['recommended_chart'] = t_chart
                 st.session_state.builder_data[idx]['x_axis_column'] = t_x
                 st.session_state.builder_data[idx]['y_axis_columns'] = t_y
                 
                 if t_chart != "none" and t_x and t_y:
                     try:
-                        df_plot = edited_df.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
+                        df_plot = df_preview.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
                         if t_chart == "line": c = alt.Chart(df_plot).mark_line(point=True).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
                         elif t_chart == "bar": c = alt.Chart(df_plot).mark_bar().encode(x=alt.X(t_x, sort='-y'), y='Wartość', color='Legenda')
                         elif t_chart == "scatter": c = alt.Chart(df_plot).mark_circle(size=60).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
                         elif t_chart == "area": c = alt.Chart(df_plot).mark_area(opacity=0.5).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                        elif t_chart == "pie": c = alt.Chart(edited_df).mark_arc().encode(color=t_x, theta=t_y[0], tooltip=[t_x, t_y[0]])
+                        elif t_chart == "pie": c = alt.Chart(df_preview).mark_arc().encode(color=t_x, theta=t_y[0], tooltip=[t_x, t_y[0]])
                         st.altair_chart(c.interactive(), use_container_width=True)
                     except: st.warning("Błąd podglądu wykresu. Upewnij się, że przypisane osie Y zawierają wyłącznie liczby.")
             st.markdown("---")
             
         if st.button("💾 ZAPISZ TĘ ZAKŁADKĘ DO APLIKACJI (KOD)", type="primary", use_container_width=True):
-            safe_name = re.sub(r'\W+', '_', tab_name).strip('_')
+            safe_name_base = re.sub(r'\W+', '_', tab_name).strip('_')
             existing_file = st.session_state.get('edit_file_target')
             
             if existing_file:
                 py_file = existing_file
             else:
+                uid = str(uuid.uuid4().hex)[:4]
+                safe_name = f"{safe_name_base}_{uid}"
                 files = glob.glob("pages/*.py")
                 max_num = 0
                 for f in files:
@@ -207,11 +255,14 @@ with tab_kreator:
                 next_num = str(max_num + 1).zfill(2)
                 py_file = f"pages/{next_num}_{safe_name}.py"
             
+            # Zapisywanie dodanej instrukcji na stałe w szablonie!
             meta_data = {
                 "tab_name": tab_name, 
+                "report_title": report_title,
                 "tab_desc": tab_desc, 
                 "link": st.session_state.builder_link, 
                 "selected_sheets": st.session_state.get("builder_selected_sheets", []),
+                "extraction_instruction": st.session_state.get('extraction_instruction', ''),
                 "tables": st.session_state.builder_data
             }
             
