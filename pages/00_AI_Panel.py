@@ -56,37 +56,81 @@ with tab_kreator:
         selected_sheets = st.multiselect("Zaznacz arkusze z danymi (AI wygeneruje szkielet, a my wtłoczymy dane):", st.session_state.builder_sheets, default=def_sheets)
         st.session_state.builder_selected_sheets = selected_sheets
         
+        # --- NOWA SEKCJA WSTĘPNEGO CZYSZCZENIA ---
+        if selected_sheets:
+            st.markdown("### 🧹 Wstępne czyszczenie arkuszy (Filtrowanie śmieci GUS)")
+            st.info("Odłącz tytuły (góra) i przypisy (dół), zanim wyślesz dane do AI. W podglądzie poniżej upewnij się, że na samej górze masz czyste nagłówki kolumn.")
+            
+            if 'sheet_settings' not in st.session_state:
+                st.session_state.sheet_settings = {}
+            
+            excel_preview = pd.ExcelFile(io.BytesIO(st.session_state.builder_excel))
+            
+            for s in selected_sheets:
+                if s not in st.session_state.sheet_settings:
+                    st.session_state.sheet_settings[s] = {'skiprows': 0, 'skipfooter': 0}
+                
+                with st.expander(f"⚙️ Ustawienia cięcia dla arkusza: {s}", expanded=True):
+                    c1, c2 = st.columns(2)
+                    skip_r = c1.number_input(f"Odetnij wiersze z GÓRY", min_value=0, max_value=50, value=st.session_state.sheet_settings[s]['skiprows'], key=f"sr_{s}")
+                    skip_f = c2.number_input(f"Odetnij wiersze z DOŁU", min_value=0, max_value=50, value=st.session_state.sheet_settings[s]['skipfooter'], key=f"sf_{s}")
+                    
+                    st.session_state.sheet_settings[s] = {'skiprows': skip_r, 'skipfooter': skip_f}
+                    
+                    try:
+                        df_preview = pd.read_excel(excel_preview, sheet_name=s, header=None, skiprows=skip_r, skipfooter=skip_f)
+                        df_preview = df_preview.replace(r'^\s*$', np.nan, regex=True).dropna(how='all', axis=0).dropna(how='all', axis=1)
+                        st.dataframe(df_preview.head(8), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Błąd podglądu dla {s}: {e}")
+
         st.markdown("### ⚙️ Sterowanie Ekstrakcją")
         col_s1, col_s2 = st.columns([1, 1])
         with col_s1:
-            fetch_limit = st.slider(
-                "Ilość wierszy do raportu (Odetnij opisy u dołu tabeli):", 
-                min_value=10, max_value=5000, 
-                value=st.session_state.get('fetch_limit', 300), step=10,
-                help="Wskazujesz Pandasowi ile wierszy finalnie wrzucić do tabeli. Model zignoruje ten limit i przeczyta tylko nagłówki, żeby oszczędzać tokeny!"
-            )
-            st.session_state.fetch_limit = fetch_limit
+            pobierz_wszystko = st.checkbox("Pobierz wszystkie wiersze z arkusza (domyślnie)", value=st.session_state.get('pobierz_wszystko', True))
+            st.session_state.pobierz_wszystko = pobierz_wszystko
+            
+            if pobierz_wszystko:
+                fetch_limit = None
+                st.session_state.fetch_limit = 300 # Backup value
+            else:
+                fetch_limit = st.number_input(
+                    "Ilość wierszy do raportu (Odetnij opisy u dołu tabeli):", 
+                    min_value=1, 
+                    value=int(st.session_state.get('fetch_limit', 300) or 300), 
+                    step=1
+                )
+                st.session_state.fetch_limit = fetch_limit
             
         with col_s2:
             extraction_instruction = st.text_area(
                 "Opcjonalne instrukcje dla AI:", 
                 value=st.session_state.get('extraction_instruction', ''),
-                placeholder="np. Tabela ma sekcje podzielone wierszami z pytaniami..."
+                placeholder="np. Usuń kolumnę Flaga oraz pierwszy wiersz ze śmieciami..."
             )
             st.session_state.extraction_instruction = extraction_instruction
         
-        if st.button("Zbuduj Układ i wstrzyknij pełne dane (Gwarancja braku obcięć!)", type="primary"):
+        if st.button("Zbuduj Układ i wstrzyknij pełne dane", type="primary"):
             if not st.session_state.gemini_key: st.error("Wymagany klucz API w panelu bocznym!")
             elif not selected_sheets: st.warning("Wybierz chociaż jeden arkusz.")
             else:
                 try:
-                    with st.spinner("AI myśli nad układem kolumn, a Python wpycha Twoje wiersze..."):
+                    with st.spinner("AI analizuje nagłówki i pisze kod Pythona na podstawie Twoich instrukcji..."):
                         excel = pd.ExcelFile(io.BytesIO(st.session_state.builder_excel))
                         
                         raw_dfs = {}
                         csv_text = ""
                         for s in selected_sheets:
-                            df_raw = pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(fetch_limit)
+                            # Zastosowanie ustawień wstępnego czyszczenia
+                            s_config = st.session_state.sheet_settings.get(s, {'skiprows': 0, 'skipfooter': 0})
+                            df_raw = pd.read_excel(
+                                excel, sheet_name=s, header=None, 
+                                skiprows=s_config['skiprows'], 
+                                skipfooter=s_config['skipfooter']
+                            )
+                            df_raw = df_raw.replace(r'^\s*$', np.nan, regex=True).dropna(how='all', axis=0).dropna(how='all', axis=1)
+                            
+                            if fetch_limit is not None: df_raw = df_raw.head(fetch_limit)
                             raw_dfs[s] = df_raw
                             csv_text += f"\n--- ZAKŁADKA: {s} ---\n{df_raw.head(15).to_csv(index=False)}"
                         
@@ -219,20 +263,56 @@ with tab_kreator:
                 else:
                     df_preview = df
 
-                st.dataframe(df_preview, use_container_width=True)
+                # Tabela wyżej, wykres niżej (Edytor Danych na żywo)
+                df_to_show = df_preview.drop(columns=[split_sel]) if split_sel != "Brak" and split_sel in df_preview.columns else df_preview
+                df_to_show = df_to_show.reset_index(drop=True)
+                
+                edited_df = st.data_editor(df_to_show, use_container_width=True, hide_index=True, key=f"preview_editor_{idx}")
                 
                 st.session_state.builder_data[idx]['recommended_chart'] = t_chart
                 st.session_state.builder_data[idx]['x_axis_column'] = t_x
                 st.session_state.builder_data[idx]['y_axis_columns'] = t_y
                 
-                if t_chart != "none" and t_x and t_y:
+                if t_chart != "none" and t_x and t_y and t_x in edited_df.columns and all(y in edited_df.columns for y in t_y):
                     try:
-                        df_plot = df_preview.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
-                        if t_chart == "line": c = alt.Chart(df_plot).mark_line(point=True).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                        elif t_chart == "bar": c = alt.Chart(df_plot).mark_bar().encode(x=alt.X(t_x, sort='-y'), y='Wartość', color='Legenda')
-                        elif t_chart == "scatter": c = alt.Chart(df_plot).mark_circle(size=60).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                        elif t_chart == "area": c = alt.Chart(df_plot).mark_area(opacity=0.5).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                        elif t_chart == "pie": c = alt.Chart(df_preview).mark_arc().encode(color=t_x, theta=t_y[0], tooltip=[t_x, t_y[0]])
+                        df_plot = edited_df.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
+                        df_plot['Wartość'] = pd.to_numeric(df_plot['Wartość'], errors='coerce')
+                        
+                        c = alt.Chart(df_plot)
+                        if t_chart == "line": 
+                            c = c.mark_line(point=alt.OverlayMarkDef(size=80)).encode(
+                                x=alt.X(t_x, sort=None), 
+                                y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                                color='Legenda:N',
+                                tooltip=[t_x, 'Legenda', 'Wartość']
+                            )
+                        elif t_chart == "bar": 
+                            c = c.mark_bar().encode(
+                                x=alt.X(t_x, sort='-y'), 
+                                y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                                color='Legenda:N',
+                                tooltip=[t_x, 'Legenda', 'Wartość']
+                            )
+                        elif t_chart == "scatter": 
+                            c = c.mark_circle(size=100).encode(
+                                x=alt.X(t_x, sort=None), 
+                                y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                                color='Legenda:N',
+                                tooltip=[t_x, 'Legenda', 'Wartość']
+                            )
+                        elif t_chart == "area": 
+                            c = c.mark_area(opacity=0.5).encode(
+                                x=alt.X(t_x, sort=None), 
+                                y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                                color='Legenda:N',
+                                tooltip=[t_x, 'Legenda', 'Wartość']
+                            )
+                        elif t_chart == "pie": 
+                            c = alt.Chart(edited_df).mark_arc().encode(
+                                color=f'{t_x}:N', 
+                                theta=f'{t_y[0]}:Q', 
+                                tooltip=[t_x, t_y[0]]
+                            )
                         st.altair_chart(c.interactive(), use_container_width=True)
                     except: st.warning("Błąd podglądu wykresu. Upewnij się, że przypisane osie Y zawierają wyłącznie liczby.")
             st.markdown("---")
@@ -241,15 +321,26 @@ with tab_kreator:
             safe_name_base = re.sub(r'\W+', '_', tab_name).strip('_')
             existing_file = st.session_state.get('edit_file_target')
             
-            if existing_file:
-                py_file = existing_file
+            # WŁAŚCIWA AKTUALIZACJA NAZWY ZAKŁADKI W MENU
+            if existing_file and os.path.exists(existing_file):
+                basename = os.path.basename(existing_file)
+                m = re.match(r'^(\d+)_', basename)
+                prefix = m.group(1) if m else "00"
+                uid = str(uuid.uuid4().hex)[:4]
+                safe_name = f"{safe_name_base}_{uid}"
+                py_file = f"pages/{prefix}_{safe_name}.py"
+                try:
+                    os.remove(existing_file) # Kasujemy stary plik z nieaktualną nazwą
+                except Exception as e:
+                    st.error(f"Nie udało się usunąć starego pliku: {e}")
             else:
                 uid = str(uuid.uuid4().hex)[:4]
                 safe_name = f"{safe_name_base}_{uid}"
                 files = glob.glob("pages/*.py")
                 max_num = 0
                 for f in files:
-                    m = re.search(r'\\(\d+)_', f) or re.search(r'/(\d+)_', f)
+                    basename = os.path.basename(f)
+                    m = re.match(r'^(\d+)_', basename)
                     if m: max_num = max(max_num, int(m.group(1)))
                 next_num = str(max_num + 1).zfill(2)
                 py_file = f"pages/{next_num}_{safe_name}.py"
@@ -260,7 +351,9 @@ with tab_kreator:
                 "tab_desc": tab_desc, 
                 "link": st.session_state.builder_link, 
                 "selected_sheets": st.session_state.get("builder_selected_sheets", []),
+                "sheet_settings": st.session_state.get("sheet_settings", {}), # <--- ZAPISYWANIE USTAWIEŃ
                 "extraction_instruction": st.session_state.get('extraction_instruction', ''),
+                "pobierz_wszystko": st.session_state.get('pobierz_wszystko', True),
                 "fetch_limit": st.session_state.get('fetch_limit', 300),
                 "tables": st.session_state.builder_data
             }
@@ -284,7 +377,7 @@ except Exception as e:
     st.error(f"Błąd ładowania danych zakładki: {{e}}")
 '''
             with open(py_file, "w", encoding="utf-8") as f: f.write(kod)
-            st.session_state.edit_file_target = None
+            st.session_state.edit_file_target = py_file # Aktualizacja w pamięci
             st.success(f"✅ Zapisano zakładkę! Użyj opcji 'Odśwież' z prawego górnego rogu przeglądarki (klawisz F5).")
 
 with tab_menedzer:

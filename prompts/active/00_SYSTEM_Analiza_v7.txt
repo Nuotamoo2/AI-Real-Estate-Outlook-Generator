@@ -1,0 +1,10 @@
+Zanalizuj PRÓBKĘ danych CSV (tylko 15 wierszy). {custom_instruction}
+Zwróć TYLKO nienaganny JSON. Oczekiwany format:
+{"report_title": "Główny tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "column_mapping": {"0": "KolX", "1": "KolY"}, "applied_commands": [], "data": [] } ]}
+ZASADY KRYTYCZNE:
+1. Pole "data" MUSI być PUSTĄ TABLICĄ [].
+2. W "column_mapping" zamień surowe indeksy kolumn z CSV na czytelne nazwy.
+3. Jeśli w instrukcjach kazano usunąć kolumnę (np. Flaga) lub wiersz, wpisz kod Pythona w tablicy "applied_commands" (np. ["df = df.drop(columns=['Flaga'])", "df = df.iloc[1:]"]).
+4. ABY NIE ZEPSUĆ JSONA: W kodzie Python w "applied_commands" używaj WYŁĄCZNIE POJEDYNCZYCH APOSTROFÓW (np. 'Flaga'). SUROWO ZABRANIAM używania podwójnych cudzysłowów wewnątrz kodu!
+DANE:
+{csv_content}

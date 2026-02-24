@@ -1,0 +1,9 @@
+SZABLON JSON:
+{template_json}
+
+NOWA PRÓBKA CSV:
+{csv_content}
+
+Zaktualizuj SZABLON JSON na podstawie nowych danych. {custom_instruction}
+ZASADA 1: Pole "data" MUSI pozostać całkowicie PUSTE ([]).
+ZASADA 2: W "applied_commands" używaj WYŁĄCZNIE pojedynczych apostrofów, nigdy podwójnych cudzysłowów.

@@ -1,0 +1,8 @@
+Zanalizuj PRÓBKĘ danych CSV (tylko 15 wierszy). {custom_instruction}
+Oczekiwany format: {"report_title": "Główny tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "column_mapping": {"0": "KolX", "1": "KolY"}, "applied_commands": [], "data": [] } ]}. 
+UWAGA 1: Pole "data" MUSI być PUSTĄ TABLICĄ []. 
+UWAGA 2: W "column_mapping" zamień surowe indeksy kolumn z CSV na czytelne nazwy.
+UWAGA 3 (KRYTYCZNA): Jeśli użytkownik prosi o usunięcie kolumny (np. "Flaga") lub wiersza, wygeneruj kod Python. Aby nie zepsuć JSON-a, użyj tablicy "applied_commands", gdzie każda linijka kodu to OSOBNY ELEMENT (string) na liście. Używaj wyłącznie apostrofów w kodzie.
+Przykład poprawny: "applied_commands": ["df = df.drop(columns=['Flaga'])", "df = df.iloc[1:]"]
+DANE:
+{csv_content}

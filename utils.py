@@ -22,15 +22,27 @@ def ensure_system_prompts():
     os.makedirs("prompts/active", exist_ok=True)
     os.makedirs("prompts/archive", exist_ok=True)
     
-    p_analiza = "prompts/active/00_SYSTEM_Analiza_v3.txt"
+    # Wersja v7 - Zakaz podwójnych cudzysłowów żeby chronić JSON
+    p_analiza = "prompts/active/00_SYSTEM_Analiza_v7.txt"
     if not os.path.exists(p_analiza):
         with open(p_analiza, "w", encoding="utf-8") as f:
-            f.write('Zanalizuj PRÓBKĘ danych CSV (tylko 15 wierszy) i wygeneruj strukturę raportu. {custom_instruction}\nOczekiwany format: {"report_title": "Główny tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "column_mapping": {"0": "KolX", "1": "KolY", "2": "InnaKolumna"}, "data": [] } ]}. Typy wykresów: line, bar, pie, scatter, area, none.\nUWAGA KRYTYCZNA 1: Pole "data" MUSI być PUSTĄ TABLICĄ []. System samodzielnie zaciągnie w to miejsce pełne dane. Nie trać tokenów na przepisywanie wierszy!\nUWAGA KRYTYCZNA 2: Musisz podać "column_mapping", w którym zamienisz surowe indeksy kolumn z CSV (np. "0", "1") na czytelne nazwy zgodne z danymi, które staną się osiami wykresu.\nDANE:\n{csv_content}')
+            f.write('Zanalizuj PRÓBKĘ danych CSV (tylko 15 wierszy). {custom_instruction}\n'
+                    'Zwróć TYLKO nienaganny JSON. Oczekiwany format:\n'
+                    '{"report_title": "Główny tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "KolX", "y_axis_columns": ["KolY"], "column_mapping": {"0": "KolX", "1": "KolY"}, "applied_commands": [], "data": [] } ]}\n'
+                    'ZASADY KRYTYCZNE:\n'
+                    '1. Pole "data" MUSI być PUSTĄ TABLICĄ [].\n'
+                    '2. W "column_mapping" zamień surowe indeksy kolumn z CSV na czytelne nazwy.\n'
+                    '3. Jeśli w instrukcjach kazano usunąć kolumnę (np. Flaga) lub wiersz, wpisz kod Pythona w tablicy "applied_commands" (np. ["df = df.drop(columns=[\'Flaga\'])", "df = df.iloc[1:]"]).\n'
+                    '4. ABY NIE ZEPSUĆ JSONA: W kodzie Python w "applied_commands" używaj WYŁĄCZNIE POJEDYNCZYCH APOSTROFÓW (np. \'Flaga\'). SUROWO ZABRANIAM używania podwójnych cudzysłowów wewnątrz kodu!\n'
+                    'DANE:\n{csv_content}')
             
-    p_rebuild = "prompts/active/00_SYSTEM_Odswiezanie_v3.txt"
+    p_rebuild = "prompts/active/00_SYSTEM_Odswiezanie_v7.txt"
     if not os.path.exists(p_rebuild):
         with open(p_rebuild, "w", encoding="utf-8") as f:
-            f.write('SZABLON JSON:\n{template_json}\n\nNOWA PRÓBKA CSV:\n{csv_content}\n\nZaktualizuj SZABLON JSON na podstawie struktury nowych danych. {custom_instruction}\nZASADA 1: Pole "data" MUSI pozostać całkowicie PUSTE ([]). My wstrzykniemy pełne dane w tle.\nZASADA 2: Zachowaj istniejące "column_mapping" z szablonu, chyba że nowe dane mają ewidentnie inną strukturę i wymagają nowych nazw. Zwróć nienaganny JSON.')
+            f.write('SZABLON JSON:\n{template_json}\n\nNOWA PRÓBKA CSV:\n{csv_content}\n\n'
+                    'Zaktualizuj SZABLON JSON na podstawie nowych danych. {custom_instruction}\n'
+                    'ZASADA 1: Pole "data" MUSI pozostać całkowicie PUSTE ([]).\n'
+                    'ZASADA 2: W "applied_commands" używaj WYŁĄCZNIE pojedynczych apostrofów, nigdy podwójnych cudzysłowów.')
 
 def setup_session_state():
     ensure_system_prompts()
@@ -51,6 +63,7 @@ def setup_session_state():
         st.session_state.miesiac = "Grudzień"
         st.session_state.nbp_df = None
         st.session_state.nbp_date = None
+        st.session_state.pobierz_wszystko = True
         st.session_state.fetch_limit = 300
     if 'descriptions' not in st.session_state:
         st.session_state.descriptions = {k: '' for k in ['nbp', 'bik']}
@@ -59,10 +72,6 @@ def load_css():
     st.markdown("""
         <style>
             .block-container {padding-top: 2rem; padding-bottom: 5rem;}
-            .gus-table { width: 100%; border-collapse: collapse; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; margin-bottom: 20px; color: #333; background-color: #ffffff; }
-            .gus-table th { background-color: #e6e6e6; border: 1px solid #a0a0a0; padding: 8px; text-align: center; font-weight: bold; }
-            .gus-table td { border: 1px solid #d0d0d0; padding: 8px; text-align: center; }
-            .gus-table td:first-child { text-align: left; font-weight: 600; min-width: 180px; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -91,9 +100,12 @@ def render_page_header(title, is_dynamic=False, meta=None, file_path=None):
                 st.session_state.edit_tab_name = meta.get("tab_name", "")
                 st.session_state.edit_report_title = meta.get("report_title", meta.get("tab_name", ""))
                 st.session_state.extraction_instruction = meta.get("extraction_instruction", "")
+                st.session_state.pobierz_wszystko = meta.get("pobierz_wszystko", True)
                 st.session_state.fetch_limit = meta.get("fetch_limit", 300)
                 st.session_state.edit_tab_desc = meta.get("tab_desc", "")
                 st.session_state.edit_file_target = file_path
+                # Pobieranie ustawień sheet_settings z metadanych
+                st.session_state.sheet_settings = meta.get("sheet_settings", {})
                 st.switch_page("pages/00_AI_Panel.py")
 
 def render_dynamic_section(meta, file_path, is_in_app=False):
@@ -129,26 +141,62 @@ def render_dynamic_section(meta, file_path, is_in_app=False):
         else:
             df_list = [(table.get('dataset_name', f'Tabela {idx+1}'), df)]
 
-        for sub_title, sub_df in df_list:
+        for sub_idx, (sub_title, sub_df) in enumerate(df_list):
             if sub_df.empty: continue
             st.markdown(f"#### {sub_title}")
+            
+            # EDYTOWALNA TABELA 
+            df_to_show = sub_df.drop(columns=[split_col]) if split_col and split_col in sub_df.columns else sub_df
+            df_to_show = df_to_show.reset_index(drop=True)
+            edited_df = st.data_editor(df_to_show, use_container_width=True, hide_index=True, key=f"app_editor_{slug}_{idx}_{sub_idx}")
+            
+            # WYKRES
             t_chart = table.get("recommended_chart", "none")
             t_x = table.get("x_axis_column")
             t_y = table.get("y_axis_columns", [])
             
-            if t_chart != "none" and t_x and t_y and t_x in sub_df.columns and all(y in sub_df.columns for y in t_y):
+            if t_chart != "none" and t_x and t_y and t_x in edited_df.columns and all(y in edited_df.columns for y in t_y):
                 try:
-                    df_plot = sub_df.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
+                    df_plot = edited_df.melt(id_vars=[t_x], value_vars=t_y, var_name='Legenda', value_name='Wartość')
+                    df_plot['Wartość'] = pd.to_numeric(df_plot['Wartość'], errors='coerce')
+                    
                     c = alt.Chart(df_plot)
-                    if t_chart == "line": c = c.mark_line(point=True).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                    elif t_chart == "bar": c = c.mark_bar().encode(x=alt.X(t_x, sort='-y'), y='Wartość', color='Legenda')
-                    elif t_chart == "scatter": c = c.mark_circle(size=60).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                    elif t_chart == "area": c = c.mark_area(opacity=0.5).encode(x=alt.X(t_x, sort=None), y='Wartość', color='Legenda')
-                    elif t_chart == "pie": c = alt.Chart(sub_df).mark_arc().encode(color=t_x, theta=t_y[0], tooltip=[t_x, t_y[0]])
+                    if t_chart == "line": 
+                        c = c.mark_line(point=alt.OverlayMarkDef(size=80)).encode(
+                            x=alt.X(t_x, sort=None), 
+                            y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                            color='Legenda:N',
+                            tooltip=[t_x, 'Legenda', 'Wartość']
+                        )
+                    elif t_chart == "bar": 
+                        c = c.mark_bar().encode(
+                            x=alt.X(t_x, sort='-y'), 
+                            y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                            color='Legenda:N',
+                            tooltip=[t_x, 'Legenda', 'Wartość']
+                        )
+                    elif t_chart == "scatter": 
+                        c = c.mark_circle(size=100).encode(
+                            x=alt.X(t_x, sort=None), 
+                            y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                            color='Legenda:N',
+                            tooltip=[t_x, 'Legenda', 'Wartość']
+                        )
+                    elif t_chart == "area": 
+                        c = c.mark_area(opacity=0.5).encode(
+                            x=alt.X(t_x, sort=None), 
+                            y=alt.Y('Wartość:Q', scale=alt.Scale(zero=False)), 
+                            color='Legenda:N',
+                            tooltip=[t_x, 'Legenda', 'Wartość']
+                        )
+                    elif t_chart == "pie": 
+                        c = alt.Chart(edited_df).mark_arc().encode(
+                            color=f'{t_x}:N', 
+                            theta=f'{t_y[0]}:Q', 
+                            tooltip=[t_x, t_y[0]]
+                        )
                     st.altair_chart(c.interactive(), use_container_width=True)
                 except Exception: pass
-            
-            st.markdown(sub_df.to_html(classes='gus-table', index=False, border=0), unsafe_allow_html=True)
             
         display_ai_section(f"{slug}_{idx}", df.to_string())
 
@@ -171,23 +219,25 @@ def clean_ai_json_output(text):
 
 def parse_and_repair_json(json_str):
     try:
-        return json.loads(json_str)
+        # Dodano strict=False żeby akceptowało błędy białych znaków u leniwego AI
+        return json.loads(json_str, strict=False)
     except Exception as e:
         try:
             fixed_str = re.sub(r',\s*$', '', json_str) 
-            return json.loads(fixed_str + "]}]}")
+            return json.loads(fixed_str + "]}]}", strict=False)
         except:
+            st.error(f"DEBUG - Surowy tekst od AI, który spowodował błąd:\n{json_str}")
             raise ValueError(f"AI zwróciło totalnie uszkodzony JSON. Spróbuj ponownie. Błąd: {str(e)}")
 
 def ai_analyze_custom_sheets(csv_content, api_key, model_name, custom_instruction="", raw_dfs=None):
     genai.configure(api_key=api_key)
-    instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA DO EKSTRAKCJI: {custom_instruction}\n\n" if custom_instruction else ""
+    instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA: {custom_instruction}\n\n" if custom_instruction else ""
     
     try:
-        with open("prompts/active/00_SYSTEM_Analiza_v3.txt", "r", encoding="utf-8") as f:
+        with open("prompts/active/00_SYSTEM_Analiza_v7.txt", "r", encoding="utf-8") as f:
             prompt_template = f.read()
     except Exception:
-        prompt_template = 'Zanalizuj próbkę CSV do JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "X", "y_axis_columns": ["Y"], "column_mapping": {"0": "X", "1": "Y"}, "data": [] } ]}. DANE:\n{csv_content}'
+        prompt_template = 'Zanalizuj próbkę CSV do JSON. {custom_instruction}\nOczekiwany format: {"report_title": "Tytuł", "tables": [ {"dataset_name": "Nazwa", "recommended_chart": "line", "x_axis_column": "X", "y_axis_columns": ["Y"], "column_mapping": {"0": "X", "1": "Y"}, "applied_commands": [], "data": [] } ]}. DANE:\n{csv_content}'
         
     prompt = prompt_template.replace("{custom_instruction}", instr_text).replace("{csv_content}", csv_content)
     
@@ -212,14 +262,12 @@ def ai_analyze_custom_sheets(csv_content, api_key, model_name, custom_instructio
 def ai_rebuild_from_template(csv_content, template_json, api_key, model_name, custom_instruction="", raw_dfs=None):
     genai.configure(api_key=api_key)
     for t in template_json: 
-        t.pop("pandas_code", None)
-        t.pop("applied_commands", None)
         t["data"] = []
         
-    instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA (MUSISZ JEJ PRZESTRZEGAĆ!): {custom_instruction}\n\n" if custom_instruction else ""
+    instr_text = f"DODATKOWA INSTRUKCJA UŻYTKOWNIKA: {custom_instruction}\n\n" if custom_instruction else ""
     
     try:
-        with open("prompts/active/00_SYSTEM_Odswiezanie_v3.txt", "r", encoding="utf-8") as f:
+        with open("prompts/active/00_SYSTEM_Odswiezanie_v7.txt", "r", encoding="utf-8") as f:
             prompt_template = f.read()
     except Exception:
         prompt_template = 'SZABLON JSON:\n{template_json}\n\nNOWA PRÓBKA CSV:\n{csv_content}\n\nZaktualizuj układ SZABLONU JSON. {custom_instruction}\nZwróć idealny JSON.'
@@ -325,13 +373,27 @@ def render_sidebar():
                         if resp.status_code == 200:
                             excel = pd.ExcelFile(io.BytesIO(resp.content))
                             sheets_to_use = item['meta'].get("selected_sheets", excel.sheet_names)
-                            f_limit = item['meta'].get("fetch_limit", st.session_state.get('fetch_limit', 300))
+                            
+                            pobierz_wszystko = item['meta'].get("pobierz_wszystko", True)
+                            f_limit = None if pobierz_wszystko else item['meta'].get("fetch_limit", 300)
                             
                             raw_dfs = {}
                             csv_text = ""
                             for s in sheets_to_use:
                                 if s in excel.sheet_names:
-                                    df_raw = pd.read_excel(excel, sheet_name=s, header=None).dropna(how='all', axis=0).dropna(how='all', axis=1).head(f_limit)
+                                    # Pobieramy ustawienia dla danego arkusza z pliku meta (Odcinanie śmieci)
+                                    sheet_config = item['meta'].get("sheet_settings", {}).get(s, {'skiprows': 0, 'skipfooter': 0})
+                                    
+                                    df_raw = pd.read_excel(
+                                        excel, sheet_name=s, header=None,
+                                        skiprows=sheet_config.get('skiprows', 0),
+                                        skipfooter=sheet_config.get('skipfooter', 0)
+                                    )
+                                    
+                                    # Magia z usuwaniem wierszy z ukrytymi spacjami!
+                                    df_raw = df_raw.replace(r'^\s*$', np.nan, regex=True)
+                                    df_raw = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
+                                    if f_limit is not None: df_raw = df_raw.head(f_limit)
                                     raw_dfs[s] = df_raw
                                     csv_text += f"\n--- ZAKŁADKA: {s} ---\n{df_raw.head(15).to_csv(index=False)}"
                             

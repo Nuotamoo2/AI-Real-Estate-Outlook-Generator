@@ -1,0 +1,9 @@
+SZABLON JSON:
+{template_json}
+
+NOWA PRÓBKA CSV:
+{csv_content}
+
+Zaktualizuj SZABLON JSON na podstawie nowych danych. {custom_instruction}
+ZASADA 1: Pole "data" MUSI pozostać całkowicie PUSTE ([]).
+ZASADA 2: Zachowaj "column_mapping". Jeśli w instrukcjach kazano zmienić układ, zapisz ewentualny kod Python do tablicy "applied_commands" jako pojedyncze stringi (np. ["kod 1", "kod 2"]). Zwróć nienaganny JSON.
